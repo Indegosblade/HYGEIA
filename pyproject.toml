@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "hygeia"
+version = "1.0.0"
+description = "Forensic-grade PII sanitization engine for filesystem dumps"
+readme = "README.md"
+license = {text = "PolyForm-Noncommercial-1.0.0"}
+requires-python = ">=3.9"
+authors = [
+    {name = "Indegosblade"},
+]
+keywords = [
+    "sanitization", "pii", "forensics", "security", "privacy",
+    "sqlite", "wal", "plist", "exif", "gdpr", "hipaa",
+    "filesystem", "compliance", "verification",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: System :: Filesystems",
+]
+
+[project.urls]
+Homepage = "https://github.com/Indegosblade/HYGEIA"
+Repository = "https://github.com/Indegosblade/HYGEIA"
+Issues = "https://github.com/Indegosblade/HYGEIA/issues"
+
+[project.scripts]
+hygeia = "hygeia_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hygeia*"]
+
+[tool.setuptools.package-data]
+hygeia = ["rules/*.json"]

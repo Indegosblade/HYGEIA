@@ -1,0 +1,42 @@
+{
+  "_comment": "HYGEIA preservation rules — paths that must NEVER be deleted",
+  "paths": [
+    "System/",
+    "usr/",
+    "bin/",
+    "sbin/",
+    "Developer/",
+    "Applications/",
+    "Library/LaunchDaemons/",
+    "Library/LaunchAgents/",
+    "private/var/jb/",
+    "private/preboot/",
+    "cores/",
+    "private/var/db/",
+    "private/var/run/",
+    "private/var/log/",
+    "private/var/mobile/Library/Logs/CrashReporter/",
+    "private/var/mobile/Library/TCC/",
+    "private/var/mobile/Library/FrontBoard/",
+    "private/var/mobile/Library/Caches/com.apple.CacheDeleteAppContainerCaches.deathrow"
+  ],
+  "files": [
+    "kernelcache",
+    "dyld_shared_cache_arm64e",
+    "dyld_shared_cache_arm64",
+    "SystemVersion.plist",
+    "BuildManifest.plist"
+  ],
+  "extensions_always_preserve": [
+    ".kext",
+    ".framework",
+    ".dylib",
+    ".tbd"
+  ],
+  "jailbreak_markers": {
+    "_comment": "Dynamic detection — see scanner.py detect_jailbreak()",
+    "dopamine": ["/var/jb/basebin/jailbreakd", "/var/jb/basebin/libjailbreak.dylib"],
+    "palera1n": ["/cores/jbinit.log"],
+    "roothide": ["/var/jb-*/"]
+  }
+}
