@@ -46,21 +46,12 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path):
         log.warning(f"VACUUM failed on {db_path}: {e}")
     conn.close()
 
-    # Delete WAL/SHM/journal files (retry on Windows file lock)
+    # Delete WAL/SHM/journal files
     for suffix in WAL_SUFFIXES:
         wal_file = Path(str(db_path) + suffix)
         if wal_file.exists():
-            try:
-                wal_file.unlink()
-                log.debug(f"Deleted {wal_file.name}")
-            except PermissionError:
-                import time
-                time.sleep(0.1)
-                try:
-                    wal_file.unlink()
-                    log.debug(f"Deleted {wal_file.name} (retry)")
-                except PermissionError:
-                    log.warning(f"Could not delete {wal_file.name} (file locked)")
+            wal_file.unlink()
+            log.debug(f"Deleted {wal_file.name}")
 
 
 def delete_database(db_path: Path) -> dict:
@@ -171,6 +162,198 @@ def find_all_databases(dump_path: Path) -> list[Path]:
             if f.suffix.lower() in SQLITE_EXTENSIONS or is_sqlite_database(f):
                 databases.append(f)
     return databases
+
+
+def sanitize_database_generic(db_path: Path) -> dict:
+    """
+    Platform-agnostic SQLite sanitizer. Scans every TEXT column in every
+    table for PII patterns (emails, phones, URLs with user data, IPs,
+    credentials) and redacts matches. Then VACUUMs to eliminate free pages.
+
+    Works on Chrome, Firefox, Android, desktop apps — anything with SQLite.
+    """
+    import re
+
+    PII_PATTERNS = {
+        "email": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
+        "phone": re.compile(r'\b(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'),
+        "ssn": re.compile(r'\b(?!000|666|9\d{2})[0-8]\d{2}-\d{2}-\d{4}\b'),
+        "credit_card": re.compile(r'\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'),
+        "ip_addr": re.compile(r'\b(?!(?:0|127|255)\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
+    }
+
+    # Column names that are very likely to contain PII
+    SENSITIVE_COLUMNS = {
+        "email", "username", "user_name", "login", "password", "passwd",
+        "phone", "phone_number", "address", "street", "city", "zip",
+        "zipcode", "postal_code", "state", "country",
+        "first_name", "last_name", "full_name", "name", "display_name",
+        "firstname", "lastname", "fullname", "nickname",
+        "company_name", "company", "street_address",
+        "username_value", "username_element", "password_value",
+        "account", "account_name", "credential", "token", "auth",
+        "secret", "api_key", "cookie", "session",
+        "card_number", "card_holder", "cardholder",
+        "ssn", "social_security", "date_of_birth", "dob",
+    }
+
+    # Tables that are entirely PII — nuke all content, keep schema
+    PII_TABLES = {
+        # Chrome/Chromium
+        "autofill", "autofill_profiles", "autofill_profile_names",
+        "autofill_profile_emails", "autofill_profile_phones",
+        "autofill_profile_addresses", "local_addresses",
+        "local_numbers", "local_names", "local_emails",
+        "contact_info", "server_addresses", "server_card_metadata",
+        "credit_cards", "local_ibans", "server_card_cloud_token_data",
+        "logins", "stats",
+        # Firefox
+        "moz_formhistory", "moz_cookies",
+        # Generic
+        "contacts", "messages", "call_log", "accounts",
+    }
+
+    # Columns to skip even if name matches — contain system/structural data
+    SAFE_COLUMNS = {
+        "id", "rowid", "key", "type", "count", "date", "timestamp",
+        "length", "size", "width", "height", "version", "flags",
+        "origin", "scheme", "port", "priority", "status",
+    }
+
+    result = {
+        "action": "generic_sanitize",
+        "path": str(db_path),
+        "tables_scanned": 0,
+        "columns_scanned": 0,
+        "rows_redacted": 0,
+        "pii_types_found": [],
+    }
+
+    if not db_path.exists() or not is_sqlite_database(db_path):
+        result["error"] = "Not a SQLite database"
+        return result
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        checkpoint_and_prepare(conn)
+        cursor = conn.cursor()
+
+        # Get all tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+        tables = [row[0] for row in cursor.fetchall()]
+
+        pii_found = set()
+
+        for table in tables:
+            result["tables_scanned"] += 1
+
+            # Nuke entire PII tables
+            if table.lower() in PII_TABLES:
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM \"{table}\"")
+                    count = cursor.fetchone()[0]
+                    if count > 0:
+                        cursor.execute(f"DELETE FROM \"{table}\"")
+                        result["rows_redacted"] += count
+                        pii_found.add(f"pii_table:{table}")
+                except sqlite3.Error:
+                    pass
+                continue
+
+            try:
+                cursor.execute(f"PRAGMA table_info(\"{table}\")")
+                columns = cursor.fetchall()
+            except sqlite3.Error:
+                continue
+
+            text_cols = []
+            for col in columns:
+                col_name = col[1]
+                col_type = (col[2] or "").upper()
+                if any(t in col_type for t in ("TEXT", "VARCHAR", "CHAR", "CLOB")) or col_type == "" or col_name.lower() in SENSITIVE_COLUMNS:
+                    text_cols.append(col_name)
+
+            for col_name in text_cols:
+                result["columns_scanned"] += 1
+                col_lower = col_name.lower()
+
+                # Direct redact columns with sensitive names
+                if col_lower in SENSITIVE_COLUMNS:
+                    try:
+                        cursor.execute(
+                            f"UPDATE \"{table}\" SET \"{col_name}\" = '[REDACTED]' "
+                            f"WHERE \"{col_name}\" IS NOT NULL AND \"{col_name}\" != ''"
+                        )
+                        affected = cursor.rowcount if cursor.rowcount > 0 else 0
+                        if affected:
+                            result["rows_redacted"] += affected
+                            pii_found.add(f"sensitive_column:{col_lower}")
+                    except sqlite3.Error:
+                        pass
+                    continue
+
+                # Regex scan other text columns for PII patterns
+                for pii_name, pattern in PII_PATTERNS.items():
+                    try:
+                        cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 5000")
+                        rows = cursor.fetchall()
+                        for rowid, value in rows:
+                            if not isinstance(value, str):
+                                continue
+                            if pattern.search(value):
+                                redacted = pattern.sub(f'[REDACTED_{pii_name.upper()}]', value)
+                                cursor.execute(
+                                    f"UPDATE \"{table}\" SET \"{col_name}\" = ? WHERE rowid = ?",
+                                    (redacted, rowid)
+                                )
+                                result["rows_redacted"] += 1
+                                pii_found.add(pii_name)
+                    except sqlite3.Error:
+                        continue
+
+        # Multi-pass: keep scanning until no new PII found (URLs embed emails, etc.)
+        pass_count = 1
+        while result["rows_redacted"] > 0 and pass_count < 5:
+            prev_redacted = result["rows_redacted"]
+            pass_redacted = 0
+            for table in tables:
+                try:
+                    cursor.execute(f"PRAGMA table_info(\"{table}\")")
+                    columns = cursor.fetchall()
+                except sqlite3.Error:
+                    continue
+                text_cols = [c[1] for c in columns if (c[2] or "").upper() in ("TEXT", "VARCHAR", "CHAR", "CLOB", "")]
+                for col_name in text_cols:
+                    for pii_name, pattern in PII_PATTERNS.items():
+                        try:
+                            cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 5000")
+                            for rowid, value in cursor.fetchall():
+                                if not isinstance(value, str):
+                                    continue
+                                if pattern.search(value):
+                                    redacted_val = pattern.sub(f'[REDACTED_{pii_name.upper()}]', value)
+                                    cursor.execute(
+                                        f"UPDATE \"{table}\" SET \"{col_name}\" = ? WHERE rowid = ?",
+                                        (redacted_val, rowid)
+                                    )
+                                    pass_redacted += 1
+                        except sqlite3.Error:
+                            continue
+            if pass_redacted == 0:
+                break
+            result["rows_redacted"] += pass_redacted
+            pass_count += 1
+
+        result["pii_types_found"] = sorted(pii_found)
+        vacuum_and_cleanup(conn, db_path)
+        log.info(f"Generic sanitized {db_path.name}: {result['tables_scanned']} tables, "
+                 f"{result['rows_redacted']} rows redacted ({pass_count} passes), PII: {result['pii_types_found']}")
+
+    except sqlite3.Error as e:
+        result["error"] = str(e)
+        log.error(f"Failed generic sanitize {db_path}: {e}")
+
+    return result
 
 
 def delete_wal_orphans(dump_path: Path) -> list[Path]:

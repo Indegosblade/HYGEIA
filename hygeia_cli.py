@@ -25,6 +25,7 @@ from hygeia.scanner import FileScanner, FileAction, ScanResult
 from hygeia.sqlite_sanitizer import (
     delete_database, sanitize_database, sanitize_knowledgec,
     sanitize_photos_sqlite, delete_wal_orphans, find_all_databases,
+    sanitize_database_generic, is_sqlite_database,
 )
 from hygeia.plist_sanitizer import sanitize_plist
 from hygeia.exif_stripper import strip_exif_directory, exiftool_available
@@ -212,15 +213,37 @@ def main():
     print("[2/5] Sanitizing...")
     all_actions = []
 
-    # Delete app containers first (biggest space savings)
-    container_actions = delete_app_containers(
-        work_path, scanner, scan_result.jailbreak, dry_run=args.dry_run
-    )
-    all_actions.extend(container_actions)
+    # Detect if this is an iOS dump or generic data
+    is_ios = (scan_result.jailbreak and scan_result.jailbreak.detected) or \
+             any(c.reason.startswith("system:") for c in scan_result.classifications)
 
-    # Execute file-level sanitization
-    file_actions = execute_sanitization(scan_result, work_path, dry_run=args.dry_run)
-    all_actions.extend(file_actions)
+    if is_ios:
+        # iOS-specific pipeline
+        container_actions = delete_app_containers(
+            work_path, scanner, scan_result.jailbreak, dry_run=args.dry_run
+        )
+        all_actions.extend(container_actions)
+
+        file_actions = execute_sanitization(scan_result, work_path, dry_run=args.dry_run)
+        all_actions.extend(file_actions)
+    else:
+        # Generic mode — scan ALL databases for PII regardless of platform
+        print("  No iOS structure detected — running generic sanitization")
+        databases = find_all_databases(work_path)
+        print(f"  Found {len(databases)} SQLite databases")
+        for db in databases:
+            if args.dry_run:
+                all_actions.append({"action": "generic_sanitize", "path": str(db.relative_to(work_path)), "dry_run": True})
+            else:
+                result = sanitize_database_generic(db)
+                all_actions.append(result)
+                if result.get("rows_redacted", 0) > 0:
+                    print(f"    {db.name}: {result['rows_redacted']} rows redacted ({', '.join(result.get('pii_types_found', []))})")
+
+        # Also sanitize plists if any exist (they're cross-platform)
+        file_actions = execute_sanitization(scan_result, work_path, dry_run=args.dry_run)
+        all_actions.extend(file_actions)
+
     print(f"  Actions: {len(all_actions)}")
     print()
 
