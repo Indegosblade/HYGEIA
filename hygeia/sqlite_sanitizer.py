@@ -46,12 +46,21 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path):
         log.warning(f"VACUUM failed on {db_path}: {e}")
     conn.close()
 
-    # Delete WAL/SHM/journal files
+    # Delete WAL/SHM/journal files (retry on Windows file lock)
     for suffix in WAL_SUFFIXES:
         wal_file = Path(str(db_path) + suffix)
         if wal_file.exists():
-            wal_file.unlink()
-            log.debug(f"Deleted {wal_file.name}")
+            try:
+                wal_file.unlink()
+                log.debug(f"Deleted {wal_file.name}")
+            except PermissionError:
+                import time
+                time.sleep(0.1)
+                try:
+                    wal_file.unlink()
+                    log.debug(f"Deleted {wal_file.name} (retry)")
+                except PermissionError:
+                    log.warning(f"Could not delete {wal_file.name} (file locked)")
 
 
 def delete_database(db_path: Path) -> dict:
