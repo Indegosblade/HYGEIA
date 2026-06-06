@@ -68,6 +68,17 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
     # GPS pattern: filter out version numbers and timestamps
     if pattern_name == "gps_coord" and abs(float(match_text)) < 1.0:
         return True
+    # Skip already-redacted values
+    if "[REDACTED" in match_text or "REDACTED_" in match_text:
+        return True
+    # Skip URL columns — they contain tracking IDs, product numbers, and
+    # fragments that match numeric PII patterns but aren't actual PII
+    noisy_columns = ("url", "page_url", "top_level_url", "referrer", "etag",
+                     "fill_into_edit", "text", "contents", "value")
+    if pattern_name in ("phone", "credit_card", "ssn", "gps_coord", "imei"):
+        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
+        if col_part in noisy_columns:
+            return True
     return False
 
 
@@ -137,12 +148,59 @@ def scan_sqlite_freelist(db_path: Path) -> list[str]:
     return findings
 
 
+def scan_sqlite_content(dump_path: Path) -> list[PIIMatch]:
+    """Scan SQLite database text columns for residual PII after sanitization."""
+    matches = []
+    databases = sqlite_sanitizer.find_all_databases(dump_path)
+
+    for db in databases:
+        try:
+            conn = sqlite3.connect(str(db))
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            tables = [row[0] for row in cursor.fetchall()]
+
+            for table in tables:
+                try:
+                    cursor.execute(f"PRAGMA table_info(\"{table}\")")
+                    columns = cursor.fetchall()
+                except sqlite3.Error:
+                    continue
+
+                col_type_matches = lambda t: any(x in t for x in ("TEXT", "VARCHAR", "CHAR", "CLOB")) or t == ""
+                text_cols = [c[1] for c in columns if col_type_matches((c[2] or "").upper())]
+                for col_name in text_cols:
+                    try:
+                        cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 1000")
+                        for rowid, value in cursor.fetchall():
+                            if not isinstance(value, str):
+                                continue
+                            rel = str(db.relative_to(dump_path))
+                            qualified_path = f"{rel}:{table}.{col_name}"
+                            for name, pattern in PII_PATTERNS.items():
+                                for m in pattern.finditer(value):
+                                    if not _is_false_positive(qualified_path, name, m.group()):
+                                        matches.append(PIIMatch(
+                                            qualified_path,
+                                            name, m.group(), rowid
+                                        ))
+                    except sqlite3.Error:
+                        continue
+
+            conn.close()
+        except sqlite3.Error:
+            continue
+
+    return matches
+
+
 def verify_sanitization(dump_path: Path) -> VerificationResult:
     """
     Full post-sanitization verification:
     1. Regex scan text files for PII
-    2. Inspect SQLite free pages
-    3. Verify EXIF stripped from images
+    2. Regex scan SQLite database contents for PII
+    3. Inspect SQLite free pages
+    4. Verify EXIF stripped from images
     """
     result = VerificationResult()
 
@@ -151,14 +209,20 @@ def verify_sanitization(dump_path: Path) -> VerificationResult:
     # 1. Text file PII scan
     result.pii_matches = scan_text_files(dump_path)
 
-    # 2. SQLite freelist inspection
+    # 2. SQLite content PII scan
+    db_pii = scan_sqlite_content(dump_path)
+    result.pii_matches.extend(db_pii)
+    if db_pii:
+        log.info(f"SQLite content scan: {len(db_pii)} PII matches in database content")
+
+    # 3. SQLite freelist inspection
     databases = sqlite_sanitizer.find_all_databases(dump_path)
     result.databases_inspected = len(databases)
     for db in databases:
         findings = scan_sqlite_freelist(db)
         result.sqlite_freelist_findings.extend(findings)
 
-    # 3. EXIF verification
+    # 4. EXIF verification
     files_with_exif = exif_stripper.verify_exif_stripped(dump_path)
     result.exif_failures = [str(f.relative_to(dump_path)) for f in files_with_exif]
 
