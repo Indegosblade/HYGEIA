@@ -317,7 +317,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
                 # Regex scan other text columns for PII patterns
                 for pii_name, pattern in PII_PATTERNS.items():
                     try:
-                        cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 5000")
+                        cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL")
                         rows = cursor.fetchall()
                         for rowid, value in rows:
                             if not isinstance(value, str):
@@ -335,20 +335,26 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
 
         # Multi-pass: keep scanning until no new PII found (URLs embed emails, etc.)
         pass_count = 1
-        while result["rows_redacted"] > 0 and pass_count < 5:
-            prev_redacted = result["rows_redacted"]
+        for pass_num in range(2, 6):
             pass_redacted = 0
             for table in tables:
+                if table.lower() in PII_TABLES:
+                    continue
                 try:
                     cursor.execute(f"PRAGMA table_info(\"{table}\")")
                     columns = cursor.fetchall()
                 except sqlite3.Error:
                     continue
-                text_cols = [c[1] for c in columns if (c[2] or "").upper() in ("TEXT", "VARCHAR", "CHAR", "CLOB", "")]
+                text_cols = [c[1] for c in columns
+                             if any(t in (c[2] or "").upper() for t in ("TEXT", "VARCHAR", "CHAR", "CLOB"))
+                             or (c[2] or "").upper() == ""
+                             and c[1].lower() not in SAFE_COLUMNS]
                 for col_name in text_cols:
+                    if col_name.lower() in SENSITIVE_COLUMNS:
+                        continue
                     for pii_name, pattern in PII_PATTERNS.items():
                         try:
-                            cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 5000")
+                            cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL AND \"{col_name}\" NOT LIKE '%[REDACTED%'")
                             for rowid, value in cursor.fetchall():
                                 if not isinstance(value, str):
                                     continue
@@ -363,8 +369,8 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
                             continue
             if pass_redacted == 0:
                 break
-            result["rows_redacted"] += pass_redacted
             pass_count += 1
+            result["rows_redacted"] += pass_redacted
 
         # FTS shadow table cleanup — forensic tools parse *_content/*_segments
         for table in tables:

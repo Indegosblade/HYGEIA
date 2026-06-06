@@ -46,9 +46,11 @@ def generate_manifest(
     """
     from .scanner import FileAction
 
+    from . import __version__
+
     manifest = {
         "tool": "HYGEIA",
-        "version": "1.0.0",
+        "version": __version__,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "ios_version": _detect_ios_version(dump_path),
         "dump_path": str(dump_path),

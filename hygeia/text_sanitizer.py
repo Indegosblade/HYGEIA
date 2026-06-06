@@ -24,7 +24,6 @@ PII_PATTERNS = {
     "ip_v6": re.compile(r'\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b'),
     "iban": re.compile(r'\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b'),
     "mac_addr": re.compile(r'\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'),
-    "zip_code": re.compile(r'\b\d{5}(?:-\d{4})?\b'),
 }
 
 SENSITIVE_JSON_KEYS = {
@@ -84,6 +83,8 @@ def _redact_json_recursive(obj, redacted_keys: list):
                 elif isinstance(obj[key], (int, float)) and obj[key]:
                     obj[key] = 0
                     redacted_keys.append(key)
+                elif isinstance(obj[key], (dict, list)):
+                    _redact_json_recursive(obj[key], redacted_keys)
             elif isinstance(obj[key], str):
                 redacted, _ = _redact_pii_in_string(obj[key])
                 if redacted != obj[key]:

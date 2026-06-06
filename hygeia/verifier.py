@@ -99,7 +99,7 @@ def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024) -> l
             continue
 
         # Skip system directories (too many false positives)
-        rel_path = str(f.relative_to(dump_path))
+        rel_path = str(f.relative_to(dump_path)).replace("\\", "/")
         skip = False
         for fp in FALSE_POSITIVE_PATHS:
             if rel_path.startswith(fp):
