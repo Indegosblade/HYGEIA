@@ -1,0 +1,42 @@
+{
+  "_comment": "HYGEIA selective database sanitization — column-level rules for mixed databases",
+  "databases": [
+    {
+      "name": "knowledgeC",
+      "path_suffix": "CoreDuet/Knowledge/knowledgeC.db",
+      "strategy": "selective",
+      "sql_commands": [
+        "UPDATE ZOBJECT SET ZVALUESTRING = '[REDACTED]' WHERE ZVALUESTRING NOT LIKE 'com.apple.%' AND ZVALUESTRING IS NOT NULL",
+        "DELETE FROM ZOBJECT WHERE ZSTREAMNAME LIKE '%safari%'",
+        "DELETE FROM ZOBJECT WHERE ZSTREAMNAME LIKE '%siri%'",
+        "DELETE FROM ZOBJECT WHERE ZSTREAMNAME LIKE '%messaging%'",
+        "DELETE FROM ZOBJECT WHERE ZSTREAMNAME LIKE '%contacts%'"
+      ]
+    },
+    {
+      "name": "Photos.sqlite",
+      "path_suffix": "PhotoData/Photos.sqlite",
+      "strategy": "selective",
+      "sql_commands": [
+        "UPDATE ZASSET SET ZLATITUDE = NULL, ZLONGITUDE = NULL WHERE ZLATITUDE IS NOT NULL",
+        "DELETE FROM ZPERSON",
+        "DELETE FROM ZDETECTEDFACE",
+        "DELETE FROM ZDETECTEDFACEPRINT"
+      ]
+    },
+    {
+      "name": "TCC.db",
+      "path_suffix": "Library/TCC/TCC.db",
+      "strategy": "preserve",
+      "sql_commands": [],
+      "_comment": "Preserve entirely — permission grants are valuable for research"
+    },
+    {
+      "name": "applicationState.db",
+      "path_suffix": "Library/FrontBoard/applicationState.db",
+      "strategy": "preserve",
+      "sql_commands": [],
+      "_comment": "Preserve — maps GUIDs to bundle IDs, needed for container analysis"
+    }
+  ]
+}
