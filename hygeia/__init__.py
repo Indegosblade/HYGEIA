@@ -1,13 +1,12 @@
 """
-HYGEIA -- Forensic-grade PII sanitization engine.
+HYGEIA — Forensic-Grade PII Sanitization
+Greek goddess of cleanliness, hygiene, and sanitation.
 
-Classifies, sanitizes, verifies, and audits filesystem dumps.
-WAL-aware SQLite pipeline, binary plist redaction, EXIF stripping,
-post-sanitization verification, and compliance-ready audit manifests.
+Platform-agnostic PII removal from databases, configs, logs, and images.
+iOS-aware with specialized rules. Works on Chrome, Firefox, Android,
+Windows, macOS, Linux — any SQLite database or structured data.
 
-Ships with iOS rules. Engine works on any SQLite database, binary
-plist, or image regardless of platform. Swap the JSON rule files
-in hygeia/rules/ for other platforms.
+HIPAA Safe Harbor, GDPR Article 4/9, CCPA compliance modes.
 """
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
