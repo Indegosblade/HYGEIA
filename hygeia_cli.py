@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-HYGEIA -- Forensic-grade PII sanitization engine.
+HYGEIA — Forensic-Grade PII Sanitization Tool (Standalone CLI)
 
-Classify, sanitize, verify, and audit filesystem dumps. WAL-aware SQLite
-pipeline, binary plist redaction, EXIF stripping, and compliance manifests.
+Platform-agnostic PII removal from filesystem dumps, databases, and
+application data. iOS-aware with specialized rules, but works on any
+platform: Chrome, Firefox, Android, Windows, macOS, Linux.
 
 Usage:
-    hygeia --input /path/to/dump --output /path/to/clean
-    hygeia --input /path/to/dump --output /path/to/clean --dry-run
+    python hygeia_cli.py --input /path/to/dump --output /path/to/clean
+    python hygeia_cli.py --input /path/to/dump --output /path/to/clean --optimize
+    python hygeia_cli.py --input /path/to/dump --output /path/to/clean --dry-run
 """
 
 import argparse
@@ -29,6 +31,7 @@ from hygeia.sqlite_sanitizer import (
 )
 from hygeia.plist_sanitizer import sanitize_plist
 from hygeia.exif_stripper import strip_exif_directory, exiftool_available
+from hygeia.text_sanitizer import sanitize_all_text_files
 from hygeia.verifier import verify_sanitization
 from hygeia.manifest import generate_manifest
 
@@ -159,13 +162,14 @@ def delete_app_containers(dump_path: Path, scanner: FileScanner, jailbreak_info,
 
 def main():
     parser = argparse.ArgumentParser(
-        description="HYGEIA -- Forensic-grade PII sanitization engine",
+        description="HYGEIA — Forensic-Grade PII Sanitization Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Example: hygeia --input ./dump --output ./clean"
+        epilog="Example: python hygeia_cli.py --input ./data_dump --output ./data_clean"
     )
-    parser.add_argument("--input", "-i", required=True, help="Path to filesystem dump")
+    parser.add_argument("--input", "-i", required=True, help="Path to filesystem dump or data directory")
     parser.add_argument("--output", "-o", required=True, help="Output path for sanitized copy")
     parser.add_argument("--dry-run", "-n", action="store_true", help="Preview actions without executing")
+    parser.add_argument("--optimize", action="store_true", help="Remove localizations and caches for smaller output")
     parser.add_argument("--skip-verify", action="store_true", help="Skip post-sanitization verification")
     parser.add_argument("--skip-exif", action="store_true", help="Skip EXIF stripping (if exiftool not available)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
@@ -183,7 +187,7 @@ def main():
         sys.exit(1)
 
     # Step 1: Copy dump
-    print(f"=== HYGEIA Filesystem Sanitization ===")
+    print(f"=== HYGEIA Forensic-Grade PII Sanitization ===")
     print(f"Input:  {input_path}")
     print(f"Output: {output_path}")
     print(f"Mode:   {'DRY RUN' if args.dry_run else 'LIVE'}")
@@ -196,7 +200,7 @@ def main():
         work_path = input_path
 
     # Step 2: Scan and classify
-    print("[1/5] Scanning filesystem...")
+    print("[1/6] Scanning filesystem...")
     scanner = FileScanner()
     scan_result = scanner.scan_dump(work_path)
 
@@ -210,7 +214,7 @@ def main():
     print()
 
     # Step 3: Execute sanitization
-    print("[2/5] Sanitizing...")
+    print("[2/6] Sanitizing databases...")
     all_actions = []
 
     # Detect if this is an iOS dump or generic data
@@ -244,29 +248,36 @@ def main():
         file_actions = execute_sanitization(scan_result, work_path, dry_run=args.dry_run)
         all_actions.extend(file_actions)
 
-    print(f"  Actions: {len(all_actions)}")
+    # Step 3: Text file sanitization
+    print("[3/6] Sanitizing text files...")
+    text_actions = sanitize_all_text_files(work_path, dry_run=args.dry_run)
+    all_actions.extend(text_actions)
+    text_redacted = sum(1 for a in text_actions if a.get("keys_redacted", 0) > 0 or
+                        a.get("lines_redacted", 0) > 0 or a.get("cells_redacted", 0) > 0 or
+                        a.get("action") == "delete_shell_history")
+    if text_redacted:
+        print(f"  Text files sanitized: {text_redacted}")
+
+    print(f"  Total actions: {len(all_actions)}")
     print()
 
     # Step 4: EXIF stripping
     if not args.skip_exif and not args.dry_run:
-        print("[3/5] Stripping EXIF metadata...")
+        print("[4/6] Stripping EXIF metadata...")
         if exiftool_available():
-            # Strip any remaining images in /var/mobile/ area
-            mobile_media = work_path / "private" / "var" / "mobile" / "Media"
-            if mobile_media.exists():
-                exif_result = strip_exif_directory(mobile_media)
-                all_actions.append(exif_result)
-                print(f"  Images processed: {exif_result.get('files_stripped', 0)}")
+            exif_result = strip_exif_directory(work_path)
+            all_actions.append(exif_result)
+            print(f"  Images processed: {exif_result.get('files_stripped', 0)}")
         else:
             print("  WARNING: exiftool not installed, skipping EXIF stripping")
-            print("  Install: apt-get install libimage-exiftool-perl")
+            print("  Install: pip install exiftool  OR  apt install libimage-exiftool-perl")
     else:
-        print("[3/5] EXIF stripping: skipped")
+        print("[4/6] EXIF stripping: skipped")
     print()
 
     # Step 5: Verification
     if not args.skip_verify and not args.dry_run:
-        print("[4/5] Verifying sanitization...")
+        print("[5/6] Verifying sanitization...")
         verification = verify_sanitization(work_path)
         if verification.passed:
             print("  PASSED — zero PII findings")
@@ -279,13 +290,13 @@ def main():
             if verification.exif_failures:
                 print(f"    EXIF remaining: {len(verification.exif_failures)}")
     else:
-        print("[4/5] Verification: skipped")
+        print("[5/6] Verification: skipped")
         from hygeia.verifier import VerificationResult
         verification = VerificationResult()
     print()
 
     # Step 6: Generate manifest
-    print("[5/5] Generating manifest...")
+    print("[6/6] Generating manifest...")
     elapsed = time.time() - start_time
     manifest_path = Path(args.manifest) if args.manifest else (work_path.parent / "deletion_manifest.json")
 

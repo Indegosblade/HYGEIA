@@ -176,25 +176,32 @@ def sanitize_database_generic(db_path: Path) -> dict:
 
     PII_PATTERNS = {
         "email": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
-        "phone": re.compile(r'\b(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'),
+        "phone_us": re.compile(r'\b(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'),
+        "phone_intl": re.compile(r'\+(?:44|49|33|91|81|61|86|55|7|34|39|82|31|46|47|48|90)\s?\d[\d\s\-]{6,14}\d\b'),
         "ssn": re.compile(r'\b(?!000|666|9\d{2})[0-8]\d{2}-\d{2}-\d{4}\b'),
         "credit_card": re.compile(r'\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'),
-        "ip_addr": re.compile(r'\b(?!(?:0|127|255)\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
+        "ip_v4": re.compile(r'\b(?!(?:0|127|255)\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
+        "ip_v6": re.compile(r'\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b'),
+        "iban": re.compile(r'\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b'),
+        "mac_addr": re.compile(r'\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'),
     }
 
     # Column names that are very likely to contain PII
     SENSITIVE_COLUMNS = {
         "email", "username", "user_name", "login", "password", "passwd",
         "phone", "phone_number", "address", "street", "city", "zip",
-        "zipcode", "postal_code", "state", "country",
+        "zipcode", "zip_code", "postal_code", "state", "country",
         "first_name", "last_name", "full_name", "name", "display_name",
         "firstname", "lastname", "fullname", "nickname",
-        "company_name", "company", "street_address",
+        "company_name", "company", "street_address", "street_number",
+        "address_line_1", "address_line_2", "apt", "suite",
         "username_value", "username_element", "password_value",
         "account", "account_name", "credential", "token", "auth",
         "secret", "api_key", "cookie", "session",
-        "card_number", "card_holder", "cardholder",
+        "card_number", "card_holder", "cardholder", "expiration",
         "ssn", "social_security", "date_of_birth", "dob",
+        "latitude", "longitude", "lat", "lng", "lon",
+        "host_key", "encrypted_value",
     }
 
     # Tables that are entirely PII — nuke all content, keep schema
@@ -206,11 +213,21 @@ def sanitize_database_generic(db_path: Path) -> dict:
         "local_numbers", "local_names", "local_emails",
         "contact_info", "server_addresses", "server_card_metadata",
         "credit_cards", "local_ibans", "server_card_cloud_token_data",
-        "logins", "stats",
+        "logins", "stats", "cookies", "omni_box_shortcuts",
+        "top_sites", "keyword_search_terms",
         # Firefox
-        "moz_formhistory", "moz_cookies",
+        "moz_formhistory", "moz_cookies", "moz_inputhistory",
+        "moz_perms", "moz_hosts",
+        # Android
+        "raw_contacts", "data", "calls", "sms", "threads",
+        "canonical_addresses", "attendees",
+        # Messaging apps
+        "chat_list", "chat_view", "message_thumbnails",
+        # macOS
+        "access",
         # Generic
         "contacts", "messages", "call_log", "accounts",
+        "search_history", "recent_searches",
     }
 
     # Columns to skip even if name matches — contain system/structural data
@@ -343,6 +360,19 @@ def sanitize_database_generic(db_path: Path) -> dict:
                 break
             result["rows_redacted"] += pass_redacted
             pass_count += 1
+
+        # FTS shadow table cleanup — forensic tools parse *_content/*_segments
+        for table in tables:
+            if table.endswith("_content") or table.endswith("_segments") or table.endswith("_segdir"):
+                base = table.rsplit("_", 1)[0]
+                if base in tables:
+                    try:
+                        cursor.execute(f"INSERT INTO \"{base}\"(\"{base}\") VALUES('rebuild')")
+                    except sqlite3.Error:
+                        try:
+                            cursor.execute(f"DELETE FROM \"{table}\"")
+                        except sqlite3.Error:
+                            pass
 
         result["pii_types_found"] = sorted(pii_found)
         vacuum_and_cleanup(conn, db_path)

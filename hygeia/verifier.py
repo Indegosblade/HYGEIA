@@ -19,11 +19,14 @@ log = logging.getLogger("hygeia.verifier")
 PII_PATTERNS = {
     "email": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
     "phone_us": re.compile(r'\b(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'),
+    "phone_intl": re.compile(r'\+(?:44|49|33|91|81|61|86|55|7|34|39|82|31|46|47|48|90)\s?\d[\d\s\-]{6,14}\d\b'),
     "ssn": re.compile(r'\b(?!000|666|9\d{2})[0-8]\d{2}[-\s]?\d{2}[-\s]?\d{4}\b'),
     "apple_id": re.compile(r'\b\S+@(?:icloud|me|mac)\.com\b', re.IGNORECASE),
-    "gps_coord": re.compile(r'-?\d{2,3}\.\d{6,}'),  # High-precision GPS (6+ decimals)
+    "gps_coord": re.compile(r'-?\d{2,3}\.\d{6,}'),
     "imei": re.compile(r'\b\d{15}\b'),
     "device_name": re.compile(r"\b\w+'s\s+(?:iPhone|iPad|iPod|Mac|Apple Watch)\b", re.IGNORECASE),
+    "iban": re.compile(r'\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b'),
+    "mac_addr": re.compile(r'\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'),
 }
 
 # File extensions that can contain readable text
@@ -75,7 +78,7 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
     # fragments that match numeric PII patterns but aren't actual PII
     noisy_columns = ("url", "page_url", "top_level_url", "referrer", "etag",
                      "fill_into_edit", "text", "contents", "value")
-    if pattern_name in ("phone", "credit_card", "ssn", "gps_coord", "imei"):
+    if pattern_name in ("phone_us", "phone_intl", "credit_card", "ssn", "gps_coord", "imei", "iban", "mac_addr"):
         col_part = path.rsplit(".", 1)[-1] if "." in path else ""
         if col_part in noisy_columns:
             return True
