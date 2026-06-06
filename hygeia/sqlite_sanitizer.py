@@ -164,7 +164,7 @@ def find_all_databases(dump_path: Path) -> list[Path]:
     return databases
 
 
-def sanitize_database_generic(db_path: Path) -> dict:
+def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_tables: set = None) -> dict:
     """
     Platform-agnostic SQLite sanitizer. Scans every TEXT column in every
     table for PII patterns (emails, phones, URLs with user data, IPs,
@@ -236,6 +236,11 @@ def sanitize_database_generic(db_path: Path) -> dict:
         "length", "size", "width", "height", "version", "flags",
         "origin", "scheme", "port", "priority", "status",
     }
+
+    if extra_columns:
+        SENSITIVE_COLUMNS = SENSITIVE_COLUMNS | extra_columns
+    if extra_tables:
+        PII_TABLES = PII_TABLES | extra_tables
 
     result = {
         "action": "generic_sanitize",
