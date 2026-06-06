@@ -32,6 +32,7 @@ from hygeia.sqlite_sanitizer import (
 from hygeia.plist_sanitizer import sanitize_plist
 from hygeia.exif_stripper import strip_exif_directory, exiftool_available
 from hygeia.text_sanitizer import sanitize_all_text_files
+from hygeia.compliance import get_compliance_profile, generate_compliance_report
 from hygeia.verifier import verify_sanitization
 from hygeia.manifest import generate_manifest
 
@@ -174,6 +175,8 @@ def main():
     parser.add_argument("--skip-exif", action="store_true", help="Skip EXIF stripping (if exiftool not available)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     parser.add_argument("--manifest", "-m", help="Custom manifest output path")
+    parser.add_argument("--compliance", choices=["hipaa", "gdpr", "ccpa", "all"],
+                        help="Compliance mode: hipaa, gdpr, ccpa, or all (union)")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
@@ -191,6 +194,11 @@ def main():
     print(f"Input:  {input_path}")
     print(f"Output: {output_path}")
     print(f"Mode:   {'DRY RUN' if args.dry_run else 'LIVE'}")
+    if args.compliance:
+        compliance = get_compliance_profile(args.compliance)
+        print(f"Compliance: {compliance.name}")
+    else:
+        compliance = None
     print()
 
     if not args.dry_run:
@@ -239,7 +247,9 @@ def main():
             if args.dry_run:
                 all_actions.append({"action": "generic_sanitize", "path": str(db.relative_to(work_path)), "dry_run": True})
             else:
-                result = sanitize_database_generic(db)
+                extra_cols = compliance.extra_sensitive_columns if compliance else None
+                extra_tbls = compliance.extra_pii_tables if compliance else None
+                result = sanitize_database_generic(db, extra_columns=extra_cols, extra_tables=extra_tbls)
                 all_actions.append(result)
                 if result.get("rows_redacted", 0) > 0:
                     print(f"    {db.name}: {result['rows_redacted']} rows redacted ({', '.join(result.get('pii_types_found', []))})")
@@ -321,6 +331,14 @@ def main():
     print(f"Space freed:        {manifest['summary']['bytes_removed'] / 1024 / 1024:.0f} MB")
     print(f"Verification:       {'PASSED' if verification.passed else 'FAILED'}")
     print(f"Elapsed:            {elapsed:.1f}s")
+
+    if args.compliance:
+        comp_report = generate_compliance_report(args.compliance, all_actions, verification.passed)
+        print(f"Compliance:         {comp_report['compliance_framework']}")
+        if comp_report.get("identifiers_covered"):
+            print(f"  Covered:  {', '.join(comp_report['identifiers_covered'])}")
+        if comp_report.get("gaps"):
+            print(f"  Gaps:     {', '.join(comp_report['gaps'])}")
     print()
 
     if not verification.passed and not args.dry_run:
