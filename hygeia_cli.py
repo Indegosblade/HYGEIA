@@ -32,6 +32,7 @@ from hygeia.sqlite_sanitizer import (
 from hygeia.plist_sanitizer import sanitize_plist
 from hygeia.exif_stripper import strip_exif_directory, exiftool_available
 from hygeia.text_sanitizer import sanitize_all_text_files
+from hygeia.filesystem_sanitizer import sanitize_filesystem
 from hygeia.compliance import get_compliance_profile, generate_compliance_report
 from hygeia.verifier import verify_sanitization
 from hygeia.manifest import generate_manifest
@@ -177,6 +178,8 @@ def main():
     parser.add_argument("--manifest", "-m", help="Custom manifest output path")
     parser.add_argument("--compliance", choices=["hipaa", "gdpr", "ccpa", "all"],
                         help="Compliance mode: hipaa, gdpr, ccpa, or all (union)")
+    parser.add_argument("--normalize-timestamps", action="store_true",
+                        help="Set all file timestamps to epoch (anti-forensic)")
     args = parser.parse_args()
 
     setup_logging(args.verbose)
@@ -208,7 +211,7 @@ def main():
         work_path = input_path
 
     # Step 2: Scan and classify
-    print("[1/6] Scanning filesystem...")
+    print("[1/7] Scanning filesystem...")
     scanner = FileScanner()
     scan_result = scanner.scan_dump(work_path)
 
@@ -222,7 +225,7 @@ def main():
     print()
 
     # Step 3: Execute sanitization
-    print("[2/6] Sanitizing databases...")
+    print("[2/7] Sanitizing databases...")
     all_actions = []
 
     # Detect if this is an iOS dump or generic data
@@ -259,7 +262,7 @@ def main():
         all_actions.extend(file_actions)
 
     # Step 3: Text file sanitization
-    print("[3/6] Sanitizing text files...")
+    print("[3/7] Sanitizing text files...")
     text_actions = sanitize_all_text_files(work_path, dry_run=args.dry_run)
     all_actions.extend(text_actions)
     text_redacted = sum(1 for a in text_actions if a.get("keys_redacted", 0) > 0 or
@@ -268,12 +271,25 @@ def main():
     if text_redacted:
         print(f"  Text files sanitized: {text_redacted}")
 
+    # Step 4: Forensic artifact cleanup
+    print("[4/7] Cleaning forensic artifacts...")
+    fs_actions = sanitize_filesystem(work_path, dry_run=args.dry_run,
+                                     normalize_timestamps=args.normalize_timestamps)
+    all_actions.extend(fs_actions)
+    fs_deleted = sum(1 for a in fs_actions if "delete" in a.get("action", ""))
+    if fs_deleted:
+        print(f"  Forensic artifacts removed: {fs_deleted}")
+    if args.normalize_timestamps:
+        ts_action = next((a for a in fs_actions if a.get("action") == "normalize_timestamps"), None)
+        if ts_action:
+            print(f"  Timestamps normalized: {ts_action.get('files_normalized', 0)} files")
+
     print(f"  Total actions: {len(all_actions)}")
     print()
 
-    # Step 4: EXIF stripping
+    # Step 5: EXIF stripping
     if not args.skip_exif and not args.dry_run:
-        print("[4/6] Stripping EXIF metadata...")
+        print("[5/7] Stripping EXIF metadata...")
         if exiftool_available():
             exif_result = strip_exif_directory(work_path)
             all_actions.append(exif_result)
@@ -282,12 +298,12 @@ def main():
             print("  WARNING: exiftool not installed, skipping EXIF stripping")
             print("  Install: pip install exiftool  OR  apt install libimage-exiftool-perl")
     else:
-        print("[4/6] EXIF stripping: skipped")
+        print("[5/7] EXIF stripping: skipped")
     print()
 
     # Step 5: Verification
     if not args.skip_verify and not args.dry_run:
-        print("[5/6] Verifying sanitization...")
+        print("[6/7] Verifying sanitization...")
         verification = verify_sanitization(work_path)
         if verification.passed:
             print("  PASSED — zero PII findings")
@@ -300,13 +316,13 @@ def main():
             if verification.exif_failures:
                 print(f"    EXIF remaining: {len(verification.exif_failures)}")
     else:
-        print("[5/6] Verification: skipped")
+        print("[6/7] Verification: skipped")
         from hygeia.verifier import VerificationResult
         verification = VerificationResult()
     print()
 
     # Step 6: Generate manifest
-    print("[6/6] Generating manifest...")
+    print("[7/7] Generating manifest...")
     elapsed = time.time() - start_time
     manifest_path = Path(args.manifest) if args.manifest else (work_path.parent / "deletion_manifest.json")
 
