@@ -26,6 +26,7 @@ from .filesystem_sanitizer import sanitize_filesystem
 from .compliance import get_compliance_profile, generate_compliance_report
 from .verifier import verify_sanitization
 from .manifest import generate_manifest
+from .forensic_cleaner import forensic_clean_all
 
 log = logging.getLogger("hygeia")
 
@@ -143,6 +144,7 @@ def main():
                         help="Set all file timestamps to epoch (anti-forensic)")
     parser.add_argument("--skip-verify", action="store_true", help="Skip post-sanitization verification")
     parser.add_argument("--skip-exif", action="store_true", help="Skip EXIF metadata stripping")
+    parser.add_argument("--skip-forensic", action="store_true", help="Skip anti-forensic hardening (LevelDB, caches, swap, timestamps)")
     parser.add_argument("--optimize", action="store_true", help="Remove localizations and caches")
     parser.add_argument("--manifest", "-m", help="Custom path for audit manifest")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
@@ -229,6 +231,20 @@ def main():
             print("  exiftool not installed — skipping")
     else:
         print("[5/7] EXIF stripping: skipped")
+    print()
+
+    # [5b/7] Forensic hardening
+    if not args.skip_forensic:
+        print("[5b/7] Anti-forensic hardening...")
+        forensic_actions = forensic_clean_all(work_path, dry_run=args.dry_run)
+        all_actions.extend(forensic_actions)
+        fc_deleted = sum(1 for a in forensic_actions if "delete" in a.get("action", "") and not a.get("dry_run"))
+        fc_norm = next((a.get("files_normalized", 0) for a in forensic_actions if a.get("action") == "normalize_timestamps"), 0)
+        print(f"  Artifacts removed: {fc_deleted}")
+        if fc_norm:
+            print(f"  Timestamps normalized: {fc_norm} items")
+    else:
+        print("[5b/7] Anti-forensic hardening: skipped")
     print()
 
     # [6/7] Verify
