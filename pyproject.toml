@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=64", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "hygeia"
@@ -36,7 +36,7 @@ Repository = "https://github.com/Indegosblade/HYGEIA"
 Issues = "https://github.com/Indegosblade/HYGEIA/issues"
 
 [project.scripts]
-hygeia = "hygeia_cli:main"
+hygeia = "hygeia.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["hygeia*"]

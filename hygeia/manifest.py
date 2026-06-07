@@ -46,9 +46,11 @@ def generate_manifest(
     """
     from .scanner import FileAction
 
+    from . import __version__
+
     manifest = {
         "tool": "HYGEIA",
-        "version": "1.0.0",
+        "version": __version__,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "ios_version": _detect_ios_version(dump_path),
         "dump_path": str(dump_path),
@@ -58,7 +60,7 @@ def generate_manifest(
             "total_size_bytes": scan_result.total_size,
             "files_deleted": sum(1 for a in sanitization_actions if a.get("action") in ("delete", "delete_directory", "delete_database")),
             "files_preserved": scan_result.preserve_count,
-            "databases_sanitized": sum(1 for a in sanitization_actions if a.get("action") in ("sanitize_database", "selective_db")),
+            "databases_sanitized": sum(1 for a in sanitization_actions if a.get("action") in ("sanitize_database", "selective_db", "generic_sanitize")),
             "plists_sanitized": sum(1 for a in sanitization_actions if a.get("action") == "plist_sanitize"),
             "exif_stripped": sum(1 for a in sanitization_actions if a.get("action") == "exif_strip"),
             "bytes_removed": scan_result.delete_size,

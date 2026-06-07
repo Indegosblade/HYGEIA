@@ -14,7 +14,7 @@ from typing import Optional
 
 log = logging.getLogger("hygeia.sqlite")
 
-SQLITE_EXTENSIONS = {".sqlite", ".db", ".sqlitedb", ".storedata", ".plsql"}
+SQLITE_EXTENSIONS = {".sqlite", ".db", ".sqlitedb", ".storedata", ".plsql", ".PLSQL"}
 WAL_SUFFIXES = ["-wal", "-shm", "-journal"]
 
 
@@ -179,29 +179,74 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         "phone_us": re.compile(r'\b(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'),
         "phone_intl": re.compile(r'\+(?:44|49|33|91|81|61|86|55|7|34|39|82|31|46|47|48|90)\s?\d[\d\s\-]{6,14}\d\b'),
         "ssn": re.compile(r'\b(?!000|666|9\d{2})[0-8]\d{2}-\d{2}-\d{4}\b'),
-        "credit_card": re.compile(r'\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'),
+        "credit_card": re.compile(r'\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2})|3(?:0[0-5]|[68]\d)\d|(?:2131|1800|35\d{2})|62\d{2})[- ]?\d{4}[- ]?\d{4}[- ]?\d{3,4}(?:[- ]?\d{3})?\b'),
         "ip_v4": re.compile(r'\b(?!(?:0|127|255)\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
         "ip_v6": re.compile(r'\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b'),
         "iban": re.compile(r'\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b'),
         "mac_addr": re.compile(r'\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'),
+        # Identity documents
+        "uk_nino": re.compile(r'\b(?!BG|GB|NK|KN|TN|NT|ZZ)[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\s?\d{2}\s?\d{2}\s?\d{2}\s?[A-D]\b'),
+        "indian_pan": re.compile(r'\b[A-Z]{3}[ABCFGHLJPT][A-Z]\d{4}[A-Z]\b'),
+        "us_ein": re.compile(r'\b(?:0[1-6]|1[0-6]|2[0-7]|3[0-9]|4[0-8]|5[0-9]|6[0-8]|7[1-7]|8[1-5]|9[0-5])-\d{7}\b'),
+        "vin": re.compile(r'\b[A-HJ-NPR-Z0-9]{3}[A-HJ-NPR-Z0-9]{5}[0-9X][A-HJ-NPR-Z0-9]{2}[0-9]{6}\b'),
+        # Credentials/tokens
+        "jwt": re.compile(r'\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'),
+        "aws_key": re.compile(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b'),
+        "github_token": re.compile(r'\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255}\b'),
+        "api_key": re.compile(r'\b(?:sk_(?:live|test|prod)_[A-Za-z0-9]{20,}|pk_(?:live|test|prod)_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|xox[bpsa]-[A-Za-z0-9-]{10,})\b'),
+        # Crypto wallets
+        "btc_wallet": re.compile(r'\b(?:1[1-9A-HJ-NP-Za-km-z]{25,34}|3[1-9A-HJ-NP-Za-km-z]{25,34}|bc1[0-9a-zA-HJ-NP-Z]{25,87})\b'),
+        "eth_wallet": re.compile(r'\b0x[0-9a-fA-F]{40}\b'),
+        # URL with embedded credentials
+        "url_creds": re.compile(r'\b(?:https?|ftp)://[^:@\s]+:[^@\s]+@[^\s]+'),
     }
 
     # Column names that are very likely to contain PII
     SENSITIVE_COLUMNS = {
+        # Identity
         "email", "username", "user_name", "login", "password", "passwd",
-        "phone", "phone_number", "address", "street", "city", "zip",
-        "zipcode", "zip_code", "postal_code", "state", "country",
+        "phone", "phone_number", "mobile", "cell", "fax",
         "first_name", "last_name", "full_name", "name", "display_name",
-        "firstname", "lastname", "fullname", "nickname",
-        "company_name", "company", "street_address", "street_number",
+        "firstname", "lastname", "fullname", "nickname", "given_name", "family_name",
+        # Address
+        "address", "street", "city", "zip", "zipcode", "zip_code",
+        "postal_code", "state", "country", "street_address", "street_number",
         "address_line_1", "address_line_2", "apt", "suite",
+        "company_name", "company", "employer", "organization",
+        # Auth/Credentials
         "username_value", "username_element", "password_value",
         "account", "account_name", "credential", "token", "auth",
-        "secret", "api_key", "cookie", "session",
-        "card_number", "card_holder", "cardholder", "expiration",
-        "ssn", "social_security", "date_of_birth", "dob",
+        "secret", "api_key", "apikey", "cookie", "session",
+        "access_token", "refresh_token", "id_token", "bearer",
+        "client_secret", "oauth_token", "private_key",
+        # Financial
+        "card_number", "card_holder", "cardholder", "expiration", "cvv",
+        "routing_number", "bank_account", "account_number",
+        "salary", "income", "wage", "purchase_history",
+        # Government ID
+        "ssn", "social_security", "tax_id", "ein", "itin",
+        "passport", "passport_number", "drivers_license", "license_number",
+        "national_id", "insurance_number", "policy_number",
+        # Medical (HIPAA)
+        "patient_id", "mrn", "medical_record", "npi", "dea_number",
+        "diagnosis", "diagnosis_code", "prescription", "medication",
+        "date_of_birth", "dob", "birthdate", "birthday",
+        "health_plan_id", "member_id", "subscriber_id",
+        # Location
         "latitude", "longitude", "lat", "lng", "lon",
-        "host_key", "encrypted_value",
+        "geolocation", "coordinates", "gps",
+        # Device/Network
+        "ip_address", "ipaddr", "remote_addr", "mac_address", "hwaddr",
+        "device_id", "device_name", "udid", "serial_number",
+        "imei", "imsi", "iccid", "meid",
+        "ssid", "wifi_name", "network_name",
+        # Biometric/Sensitive
+        "fingerprint", "biometric", "face_data",
+        "race", "ethnicity", "religion", "political_affiliation",
+        "sexual_orientation", "gender", "sex",
+        "genetic_data", "health_data",
+        # Browser
+        "host_key", "encrypted_value", "user_agent",
     }
 
     # Tables that are entirely PII — nuke all content, keep schema
@@ -209,25 +254,40 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         # Chrome/Chromium
         "autofill", "autofill_profiles", "autofill_profile_names",
         "autofill_profile_emails", "autofill_profile_phones",
-        "autofill_profile_addresses", "local_addresses",
-        "local_numbers", "local_names", "local_emails",
+        "autofill_profile_addresses", "autofill_profiles_trash",
+        "local_addresses", "local_numbers", "local_names", "local_emails",
         "contact_info", "server_addresses", "server_card_metadata",
         "credit_cards", "local_ibans", "server_card_cloud_token_data",
+        "masked_credit_cards", "password_notes", "insecure_credentials",
         "logins", "stats", "cookies", "omni_box_shortcuts",
         "top_sites", "keyword_search_terms",
+        "content_annotations", "context_annotations",
+        "downloads", "downloads_url_chains",
+        "network_action_predictor",
         # Firefox
         "moz_formhistory", "moz_cookies", "moz_inputhistory",
-        "moz_perms", "moz_hosts",
+        "moz_perms", "moz_hosts", "moz_annos",
+        "moz_places_metadata", "moz_places_metadata_search_queries",
+        "moz_bookmarks_deleted", "moz_logins",
+        "webappsstore2", "storage_sync_data", "storage_sync_mirror",
         # Android
-        "raw_contacts", "data", "calls", "sms", "threads",
-        "canonical_addresses", "attendees",
+        "raw_contacts", "data", "calls", "sms", "threads", "pdu", "addr", "part",
+        "canonical_addresses", "attendees", "phone_lookup", "name_lookup",
+        "siminfo", "carriers",
         # Messaging apps
         "chat_list", "chat_view", "message_thumbnails",
-        # macOS
-        "access",
+        # iOS/macOS
+        "access", "history_items", "history_visits", "history_tombstones",
+        "cloud_tabs", "bookmark_tags",
+        "zperson", "zdetectedface", "zdetectedfaceprint",
+        "zcloudsharedalbuminvitationrecord", "zshare", "zmemory", "zsceneprint",
+        # Windows
+        "notification",
         # Generic
         "contacts", "messages", "call_log", "accounts",
         "search_history", "recent_searches",
+        "purchase_history", "geolocation",
+        "browsing_history", "form_history",
     }
 
     # Columns to skip even if name matches — contain system/structural data
@@ -317,7 +377,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
                 # Regex scan other text columns for PII patterns
                 for pii_name, pattern in PII_PATTERNS.items():
                     try:
-                        cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 5000")
+                        cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL")
                         rows = cursor.fetchall()
                         for rowid, value in rows:
                             if not isinstance(value, str):
@@ -335,20 +395,26 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
 
         # Multi-pass: keep scanning until no new PII found (URLs embed emails, etc.)
         pass_count = 1
-        while result["rows_redacted"] > 0 and pass_count < 5:
-            prev_redacted = result["rows_redacted"]
+        for pass_num in range(2, 6):
             pass_redacted = 0
             for table in tables:
+                if table.lower() in PII_TABLES:
+                    continue
                 try:
                     cursor.execute(f"PRAGMA table_info(\"{table}\")")
                     columns = cursor.fetchall()
                 except sqlite3.Error:
                     continue
-                text_cols = [c[1] for c in columns if (c[2] or "").upper() in ("TEXT", "VARCHAR", "CHAR", "CLOB", "")]
+                text_cols = [c[1] for c in columns
+                             if any(t in (c[2] or "").upper() for t in ("TEXT", "VARCHAR", "CHAR", "CLOB"))
+                             or (c[2] or "").upper() == ""
+                             and c[1].lower() not in SAFE_COLUMNS]
                 for col_name in text_cols:
+                    if col_name.lower() in SENSITIVE_COLUMNS:
+                        continue
                     for pii_name, pattern in PII_PATTERNS.items():
                         try:
-                            cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 5000")
+                            cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL AND \"{col_name}\" NOT LIKE '%[REDACTED%'")
                             for rowid, value in cursor.fetchall():
                                 if not isinstance(value, str):
                                     continue
@@ -363,8 +429,8 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
                             continue
             if pass_redacted == 0:
                 break
-            result["rows_redacted"] += pass_redacted
             pass_count += 1
+            result["rows_redacted"] += pass_redacted
 
         # FTS shadow table cleanup — forensic tools parse *_content/*_segments
         for table in tables:
