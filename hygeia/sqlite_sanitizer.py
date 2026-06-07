@@ -6,22 +6,14 @@ Standard deletion leaves them intact. Every database goes through:
 checkpoint > secure_delete > sanitize > VACUUM > delete WAL.
 """
 
-import hashlib
 import sqlite3
 import time
 import logging
 from pathlib import Path
 
+from .utils import sha256 as _sha256
+
 log = logging.getLogger("hygeia.sqlite")
-
-
-def _sha256(filepath: Path) -> str:
-    """Return the SHA256 hex digest of a file's contents."""
-    h = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 SQLITE_EXTENSIONS = {".sqlite", ".db", ".sqlitedb", ".storedata", ".plsql", ".PLSQL"}
 WAL_SUFFIXES = ["-wal", "-shm", "-journal"]
