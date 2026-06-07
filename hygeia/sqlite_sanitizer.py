@@ -14,7 +14,7 @@ from typing import Optional
 
 log = logging.getLogger("hygeia.sqlite")
 
-SQLITE_EXTENSIONS = {".sqlite", ".db", ".sqlitedb", ".storedata", ".plsql"}
+SQLITE_EXTENSIONS = {".sqlite", ".db", ".sqlitedb", ".storedata", ".plsql", ".PLSQL"}
 WAL_SUFFIXES = ["-wal", "-shm", "-journal"]
 
 
@@ -188,20 +188,50 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
 
     # Column names that are very likely to contain PII
     SENSITIVE_COLUMNS = {
+        # Identity
         "email", "username", "user_name", "login", "password", "passwd",
-        "phone", "phone_number", "address", "street", "city", "zip",
-        "zipcode", "zip_code", "postal_code", "state", "country",
+        "phone", "phone_number", "mobile", "cell", "fax",
         "first_name", "last_name", "full_name", "name", "display_name",
-        "firstname", "lastname", "fullname", "nickname",
-        "company_name", "company", "street_address", "street_number",
+        "firstname", "lastname", "fullname", "nickname", "given_name", "family_name",
+        # Address
+        "address", "street", "city", "zip", "zipcode", "zip_code",
+        "postal_code", "state", "country", "street_address", "street_number",
         "address_line_1", "address_line_2", "apt", "suite",
+        "company_name", "company", "employer", "organization",
+        # Auth/Credentials
         "username_value", "username_element", "password_value",
         "account", "account_name", "credential", "token", "auth",
-        "secret", "api_key", "cookie", "session",
-        "card_number", "card_holder", "cardholder", "expiration",
-        "ssn", "social_security", "date_of_birth", "dob",
+        "secret", "api_key", "apikey", "cookie", "session",
+        "access_token", "refresh_token", "id_token", "bearer",
+        "client_secret", "oauth_token", "private_key",
+        # Financial
+        "card_number", "card_holder", "cardholder", "expiration", "cvv",
+        "routing_number", "bank_account", "account_number",
+        "salary", "income", "wage", "purchase_history",
+        # Government ID
+        "ssn", "social_security", "tax_id", "ein", "itin",
+        "passport", "passport_number", "drivers_license", "license_number",
+        "national_id", "insurance_number", "policy_number",
+        # Medical (HIPAA)
+        "patient_id", "mrn", "medical_record", "npi", "dea_number",
+        "diagnosis", "diagnosis_code", "prescription", "medication",
+        "date_of_birth", "dob", "birthdate", "birthday",
+        "health_plan_id", "member_id", "subscriber_id",
+        # Location
         "latitude", "longitude", "lat", "lng", "lon",
-        "host_key", "encrypted_value",
+        "geolocation", "coordinates", "gps",
+        # Device/Network
+        "ip_address", "ipaddr", "remote_addr", "mac_address", "hwaddr",
+        "device_id", "device_name", "udid", "serial_number",
+        "imei", "imsi", "iccid", "meid",
+        "ssid", "wifi_name", "network_name",
+        # Biometric/Sensitive
+        "fingerprint", "biometric", "face_data",
+        "race", "ethnicity", "religion", "political_affiliation",
+        "sexual_orientation", "gender", "sex",
+        "genetic_data", "health_data",
+        # Browser
+        "host_key", "encrypted_value", "user_agent",
     }
 
     # Tables that are entirely PII — nuke all content, keep schema
