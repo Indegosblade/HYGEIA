@@ -9,6 +9,7 @@ checkpoint > secure_delete > sanitize > VACUUM > delete WAL.
 import hashlib
 import sqlite3
 import os
+import time
 import logging
 from pathlib import Path
 from typing import Optional
@@ -48,13 +49,45 @@ def checkpoint_and_prepare(conn: sqlite3.Connection):
 
 
 def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path):
-    """VACUUM to rebuild database eliminating free pages, then delete WAL/SHM."""
+    """VACUUM to rebuild database eliminating free pages, then delete WAL/SHM.
+
+    Chrome's Login Data and similar databases keep in-progress statements open
+    while VACUUM runs, causing "cannot VACUUM - SQL statements in progress".
+    Fix: flush WAL first, close ALL cursors by reopening a fresh connection
+    just for VACUUM, with one retry on failure.
+    """
     conn.commit()
+
+    # Flush WAL into the main database file so VACUUM sees a clean state.
     try:
-        conn.execute("VACUUM")
-    except sqlite3.OperationalError as e:
-        log.warning(f"VACUUM failed on {db_path}: {e}")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError:
+        pass  # Not in WAL mode — ignore
+
+    # Close the connection (and with it every cursor) before VACUUM.
     conn.close()
+
+    def _do_vacuum(path: Path) -> bool:
+        vconn = None
+        try:
+            vconn = sqlite3.connect(str(path))
+            vconn.execute("VACUUM")
+            vconn.close()
+            return True
+        except sqlite3.OperationalError as e:
+            log.warning(f"VACUUM attempt failed on {path}: {e}")
+            if vconn:
+                try:
+                    vconn.close()
+                except Exception:
+                    pass
+            return False
+
+    if not _do_vacuum(db_path):
+        # One retry after a brief pause — lets any OS-level lock clear.
+        time.sleep(0.1)
+        if not _do_vacuum(db_path):
+            log.warning(f"VACUUM failed on {db_path} after retry — free pages may remain")
 
     # Delete WAL/SHM/journal files
     for suffix in WAL_SUFFIXES:
