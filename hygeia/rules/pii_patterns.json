@@ -81,7 +81,7 @@
         },
         "device_name": {
           "regex": "\\b\\w+'s\\s+(?:iPhone|iPad|iPod|Mac|Apple Watch|MacBook|iMac)\\b",
-          "description": "Apple device names with possessive (Kevin's iPhone)",
+          "description": "Apple device names with possessive (Lars's iPhone)",
           "flags": ["IGNORECASE"]
         },
         "apple_id": {
