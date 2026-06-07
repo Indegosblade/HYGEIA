@@ -385,6 +385,24 @@ Documenting what HYGEIA doesn't do is as important as what it does:
 | **Memory dumps** | Raw RAM dumps (.raw, .vmem, hibernation files) are deleted but not parsed for PII extraction. |
 | **Language detection** | PII patterns are primarily English/Latin-script. CJK names, Arabic identifiers, and non-Latin personal data may not match regex patterns. Column-name and table-name detection still catches these in structured databases. |
 
+### Verifier Suppressions (Known False Positive Filters)
+
+The post-sanitization verifier intentionally suppresses certain pattern matches that are structurally identical to PII but are not personally identifiable in context. These are documented here because an overly aggressive filter could mask a real finding:
+
+| Pattern | Suppressed When | Rationale |
+|---------|----------------|-----------|
+| `swift_bic` | 8-char all-uppercase string, or ≤2 unique characters, or inside `.plist` files | Apple plist binary data contains carrier bundle identifiers (e.g. `BUNDLEID`) that match SWIFT format but aren't bank codes. |
+| `url_credentials` | URL contains `apple.com` or `cdn-apple.com` | Apple CDN download URLs use `user:token@host` format for authenticated firmware downloads — not user credentials. |
+| `us_routing` / `cusip` / `south_korean_rrn` | All digits have ≤2 unique values, or inside `.plist` | Sequential/repeated digit strings (`012345678`, `111111111`) in binary plists are padding bytes, not financial identifiers. |
+| `dea_number` | Inside `.plist` files | Carrier bundle checksums match DEA alphanumeric format by coincidence. |
+| `bitcoin_address` | Match is purely hexadecimal (`[0-9a-f]` only) | Hex UUIDs and hash digests (ChromaDB embedding IDs, git SHAs) start with `1` and match the base58 length requirements but aren't crypto addresses. Real bitcoin uses base58 (mixed case, excludes 0/O/I/l). |
+| `password_kv` | Column is a vector DB content column (`string_value`, `c0`, `metadata`, `document`) | Embedding databases store conversation text that naturally contains the word "password" in context — not actual credential key-value pairs. |
+| `ssn` | Column is a CoreData internal (`z_pk`, `z_ent`, `zvalue`, etc.) or inside `.plist`/`.db` files | Sequential integers and epoch timestamps in Apple CoreData schemas match 9-digit SSN format. |
+| `ip_v4` | Address is in RFC-1918 private range, Apple 17/8 block, or all single-digit octets | Private/internal IPs and version strings (e.g. `2.3.5.8`) aren't user-identifying. |
+| `gps_coord` | Value > 180 or < 1, or decimal part ≥ 8 digits in `.plist`, or in `external_mod_tag` column | Layout metrics, version numbers, and sync tags match float format but aren't geographic coordinates. |
+
+**If you suspect a suppression is hiding real PII in your dataset**, run `hygeia --skip-verify` and then manually inspect the output with your own tooling. The suppressions exist to reduce noise on common data types — they are not guarantees.
+
 HYGEIA reports what it skipped. Check the audit manifest (`deletion_manifest.json`) for any files that were classified but not processed — these may need manual review.
 
 ---
