@@ -158,6 +158,41 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
         for o in orphans:
             actions.append({"action": "delete_orphan_wal", "path": str(o.relative_to(work_path))})
 
+    # Universal plist scan — runs on ALL .plist files regardless of platform/scanner classification.
+    # The iOS scanner-based path above only catches paths matching plist_patterns.json sanitize_paths
+    # (e.g. /mobile/Library/Preferences/). Flat or non-iOS dumps miss this entirely.
+    # Track paths already handled by the scanner-based pass to avoid double-processing.
+    already_sanitized = {
+        str(work_path / c.path)
+        for c in scan_result.classifications
+        if c.action == FileAction.PLIST_SANITIZE
+    }
+    all_plists = [p for p in work_path.rglob("*.plist") if p.is_file() and str(p) not in already_sanitized]
+    total_plists = len(all_plists)
+    if total_plists > 0:
+        log.info(f"Universal plist scan: {total_plists} plist files")
+        if dry_run:
+            for plist in all_plists:
+                actions.append({"action": "plist_sanitize", "path": str(plist.relative_to(work_path)), "dry_run": True})
+        elif workers > 1:
+            plist_results = [None] * total_plists
+            futures_map = {}
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for idx, plist in enumerate(all_plists):
+                    future = executor.submit(sanitize_plist, plist)
+                    futures_map[future] = idx
+                completed = 0
+                for future in as_completed(futures_map):
+                    idx = futures_map[future]
+                    completed += 1
+                    plist_results[idx] = future.result()
+                    log.debug(f"Plist scan {completed}/{total_plists}: {all_plists[idx].name}")
+            actions.extend(r for r in plist_results if r is not None)
+        else:
+            for i, plist in enumerate(all_plists):
+                log.debug(f"Plist scan {i + 1}/{total_plists}: {plist.name}")
+                actions.append(sanitize_plist(plist))
+
     return actions
 
 
