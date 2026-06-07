@@ -9,4 +9,4 @@ Windows, macOS, Linux — any SQLite database or structured data.
 HIPAA Safe Harbor, GDPR Article 4/9, CCPA compliance modes.
 """
 
-__version__ = "2.0.0"
+__version__ = "3.0.0"

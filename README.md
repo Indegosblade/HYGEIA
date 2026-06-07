@@ -3,6 +3,7 @@
 [![CI](https://github.com/Indegosblade/HYGEIA/actions/workflows/ci.yml/badge.svg)](https://github.com/Indegosblade/HYGEIA/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/Indegosblade/HYGEIA/branch/main/graph/badge.svg)](https://codecov.io/gh/Indegosblade/HYGEIA)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey.svg)](https://github.com/Indegosblade/HYGEIA/actions/workflows/ci.yml)
 [![License: PolyForm](https://img.shields.io/badge/license-PolyForm%20NC-green.svg)](LICENSE)
 
 Forensic-grade PII sanitization for filesystem dumps, SQLite databases, configs, and images. HIPAA/GDPR/CCPA compliance modes included.
