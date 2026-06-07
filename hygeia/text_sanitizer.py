@@ -13,7 +13,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from .patterns import load_patterns, PatternRegistry
+from .patterns import load_patterns, get_default_registry, PatternRegistry
 from .utils import sha256 as _sha256
 
 log = logging.getLogger("hygeia.text")
@@ -24,7 +24,7 @@ _registry: PatternRegistry | None = None
 def _get_registry() -> PatternRegistry:
     global _registry
     if _registry is None:
-        _registry = load_patterns()
+        _registry = get_default_registry()
     return _registry
 
 

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import sqlite_sanitizer, exif_stripper
-from .patterns import load_patterns, PatternRegistry
+from .patterns import load_patterns, get_default_registry, PatternRegistry
 
 log = logging.getLogger("hygeia.verifier")
 
@@ -26,7 +26,7 @@ _registry: PatternRegistry | None = None
 def _get_registry() -> PatternRegistry:
     global _registry
     if _registry is None:
-        _registry = load_patterns()
+        _registry = get_default_registry()
     return _registry
 
 
