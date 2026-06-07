@@ -83,11 +83,42 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path):
                     pass
             return False
 
+    def _do_vacuum_journal_delete(path: Path) -> bool:
+        """Switch to DELETE journal mode first, then VACUUM.
+
+        Chrome's Login Data uses WAL mode.  Switching to DELETE journal mode
+        forces a full WAL checkpoint and removes the WAL file, which clears the
+        OS-level lock that was blocking VACUUM.
+        """
+        vconn = None
+        try:
+            vconn = sqlite3.connect(str(path))
+            vconn.execute("PRAGMA journal_mode=DELETE")
+            vconn.commit()
+            vconn.execute("VACUUM")
+            vconn.close()
+            return True
+        except sqlite3.OperationalError as e:
+            log.warning(f"VACUUM (journal_mode=DELETE) failed on {path}: {e}")
+            if vconn:
+                try:
+                    vconn.close()
+                except Exception:
+                    pass
+            return False
+
     if not _do_vacuum(db_path):
-        # One retry after a brief pause — lets any OS-level lock clear.
+        # First retry: brief pause to let any OS-level lock clear.
         time.sleep(0.1)
         if not _do_vacuum(db_path):
-            log.warning(f"VACUUM failed on {db_path} after retry — free pages may remain")
+            # Second retry: switch to DELETE journal mode first (clears WAL
+            # lock held by Chrome and similar WAL-mode databases).
+            time.sleep(0.5)
+            if not _do_vacuum_journal_delete(db_path):
+                log.warning(
+                    f"VACUUM failed on {db_path} after all retries — "
+                    f"free pages may remain (expected for locked WAL databases)"
+                )
 
     # Delete WAL/SHM/journal files
     for suffix in WAL_SUFFIXES:
