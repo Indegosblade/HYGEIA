@@ -22,7 +22,7 @@ from .sqlite_sanitizer import (
     sanitize_database_generic, is_sqlite_database,
 )
 from .plist_sanitizer import sanitize_plist
-from .exif_stripper import strip_exif_directory, exiftool_available
+from .exif_stripper import strip_exif_directory, exiftool_available, find_exiftool
 from .text_sanitizer import sanitize_all_text_files
 from .filesystem_sanitizer import sanitize_filesystem
 from .compliance import get_compliance_profile, generate_compliance_report
@@ -194,6 +194,13 @@ def main():
     setup_logging(args.verbose)
     start_time = time.time()
 
+    # Warn early if exiftool is missing so the user sees it before the pipeline runs
+    if not args.skip_exif and find_exiftool() is None:
+        print(
+            "WARNING: exiftool not installed. Image metadata will NOT be stripped.\n"
+            "         Install from https://exiftool.org/ to enable EXIF stripping."
+        )
+
     input_path = Path(args.input).resolve()
     output_path = Path(args.output).resolve()
 
@@ -269,12 +276,12 @@ def main():
     # [5/7] EXIF
     if not args.skip_exif and not args.dry_run:
         print("[5/7] Stripping EXIF metadata...")
-        if exiftool_available():
-            exif_result = strip_exif_directory(work_path)
-            all_actions.append(exif_result)
-            print(f"  Images processed: {exif_result.get('files_stripped', 0)}")
+        exif_result = strip_exif_directory(work_path)
+        all_actions.append(exif_result)
+        if exif_result.get("skipped"):
+            print(f"  WARNING: exiftool not found — EXIF metadata was NOT stripped")
         else:
-            print("  exiftool not installed — skipping")
+            print(f"  Images processed: {exif_result.get('files_stripped', 0)}")
     else:
         print("[5/7] EXIF stripping: skipped")
     print()

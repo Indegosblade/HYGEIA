@@ -15,16 +15,44 @@ log = logging.getLogger("hygeia.exif")
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".tiff", ".tif", ".gif", ".bmp"}
 
+# Common install locations to probe when exiftool is not on PATH
+_EXIFTOOL_FALLBACK_PATHS = [
+    r"C:\exiftool\exiftool.exe",
+    r"C:\Program Files\exiftool\exiftool.exe",
+    "/usr/bin/exiftool",
+    "/usr/local/bin/exiftool",
+]
+
+
+def find_exiftool() -> str | None:
+    """
+    Return the path to exiftool, or None if not found.
+
+    Checks PATH first via shutil.which, then falls back to common install
+    locations on Windows and Unix.
+    """
+    found = shutil.which("exiftool")
+    if found:
+        return found
+    for candidate in _EXIFTOOL_FALLBACK_PATHS:
+        if Path(candidate).is_file():
+            return candidate
+    return None
+
 
 def exiftool_available() -> bool:
-    """Check if exiftool is installed."""
-    return shutil.which("exiftool") is not None
+    """Check if exiftool is installed (PATH or common install locations)."""
+    return find_exiftool() is not None
 
 
 def strip_exif_directory(path: Path) -> dict:
     """
     Strip ALL EXIF metadata from all images in directory recursively.
     Uses exiftool -all= which removes all metadata tags.
+
+    Returns a result dict. If exiftool is not installed the dict contains
+    ``"skipped": True`` and ``"reason": "exiftool not installed"`` and no
+    metadata is stripped.
     """
     result = {
         "action": "exif_strip",
@@ -33,9 +61,15 @@ def strip_exif_directory(path: Path) -> dict:
         "errors": [],
     }
 
-    if not exiftool_available():
-        result["error"] = "exiftool not installed. Run: apt-get install libimage-exiftool-perl"
-        log.error(result["error"])
+    exiftool_path = find_exiftool()
+    if exiftool_path is None:
+        msg = (
+            "exiftool not found — EXIF metadata stripping will be skipped. "
+            "Install from https://exiftool.org/"
+        )
+        log.warning(msg)
+        result["skipped"] = True
+        result["reason"] = "exiftool not installed"
         return result
 
     if not path.exists():
@@ -43,7 +77,7 @@ def strip_exif_directory(path: Path) -> dict:
 
     try:
         proc = subprocess.run(
-            ["exiftool", "-all=", "-overwrite_original", "-r", "-q", str(path)],
+            [exiftool_path, "-all=", "-overwrite_original", "-r", "-q", str(path)],
             capture_output=True, text=True, timeout=600
         )
         # exiftool reports files processed in stderr
@@ -66,11 +100,12 @@ def strip_exif_directory(path: Path) -> dict:
 
 def strip_single_file(filepath: Path) -> bool:
     """Strip EXIF from a single image file."""
-    if not exiftool_available():
+    exiftool_path = find_exiftool()
+    if exiftool_path is None:
         return False
     try:
         proc = subprocess.run(
-            ["exiftool", "-all=", "-overwrite_original", "-q", str(filepath)],
+            [exiftool_path, "-all=", "-overwrite_original", "-q", str(filepath)],
             capture_output=True, timeout=30
         )
         return proc.returncode == 0
@@ -82,7 +117,8 @@ def verify_exif_stripped(path: Path) -> list[Path]:
     """Verify no images have GPS or PII EXIF tags remaining."""
     files_with_exif = []
 
-    if not exiftool_available():
+    exiftool_path = find_exiftool()
+    if exiftool_path is None:
         log.warning("Cannot verify EXIF — exiftool not installed")
         return files_with_exif
 
@@ -91,7 +127,7 @@ def verify_exif_stripped(path: Path) -> list[Path]:
             continue
         try:
             proc = subprocess.run(
-                ["exiftool", "-gps*", "-Make", "-Model", "-q", "-s3", str(f)],
+                [exiftool_path, "-gps*", "-Make", "-Model", "-q", "-s3", str(f)],
                 capture_output=True, text=True, timeout=10
             )
             if proc.stdout.strip():
