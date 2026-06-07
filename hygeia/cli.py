@@ -8,9 +8,11 @@ Android, Windows, macOS) activate automatically based on detected content.
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .scanner import FileScanner, FileAction, ScanResult
@@ -49,7 +51,15 @@ def copy_dump(input_path: Path, output_path: Path):
     log.info("Copy complete")
 
 
-def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry_run: bool) -> list[dict]:
+def _resolve_workers(workers: int) -> int:
+    """Resolve worker count: 0 means auto-detect (cpu_count), 1 means sequential."""
+    if workers == 0:
+        return os.cpu_count() or 1
+    return max(1, workers)
+
+
+def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry_run: bool,
+                       workers: int = 1) -> list[dict]:
     actions = []
 
     is_ios = (scan_result.jailbreak and scan_result.jailbreak.detected) or \
@@ -109,16 +119,38 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
     databases = find_all_databases(work_path)
     extra_cols = compliance.extra_sensitive_columns if compliance else None
     extra_tbls = compliance.extra_pii_tables if compliance else None
-    generic_count = 0
+    total_dbs = len(databases)
 
-    for db in databases:
-        if dry_run:
+    if dry_run:
+        for db in databases:
             actions.append({"action": "generic_sanitize", "path": str(db.relative_to(work_path)), "dry_run": True})
-        else:
+    elif workers > 1:
+        # Parallel database sanitization
+        db_results = [None] * total_dbs
+        futures_map = {}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for idx, db in enumerate(databases):
+                future = executor.submit(sanitize_database_generic, db,
+                                         extra_cols, extra_tbls)
+                futures_map[future] = idx
+            completed = 0
+            for future in as_completed(futures_map):
+                idx = futures_map[future]
+                completed += 1
+                result = future.result()
+                db_results[idx] = result
+                log.info(f"Sanitizing database {completed}/{total_dbs}: {databases[idx].name}")
+                if result.get("rows_redacted", 0) > 0:
+                    print(f"    {databases[idx].name}: {result['rows_redacted']} rows redacted "
+                          f"({', '.join(result.get('pii_types_found', []))})")
+        actions.extend(db_results)
+    else:
+        # Sequential database sanitization
+        for i, db in enumerate(databases):
+            log.info(f"Sanitizing database {i + 1}/{total_dbs}: {db.name}")
             result = sanitize_database_generic(db, extra_columns=extra_cols, extra_tables=extra_tbls)
             actions.append(result)
             if result.get("rows_redacted", 0) > 0:
-                generic_count += 1
                 print(f"    {db.name}: {result['rows_redacted']} rows redacted ({', '.join(result.get('pii_types_found', []))})")
 
     if not dry_run:
@@ -148,6 +180,15 @@ def main():
     parser.add_argument("--optimize", action="store_true", help="Remove localizations and caches")
     parser.add_argument("--manifest", "-m", help="Custom path for audit manifest")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
+    parser.add_argument(
+        "--workers", "-w", type=int, default=1,
+        metavar="N",
+        help=(
+            "Number of parallel workers for independent sanitization tasks. "
+            "1 = sequential (default). 0 = auto-detect (os.cpu_count()). "
+            ">1 = explicit thread pool size."
+        ),
+    )
     args = parser.parse_args()
 
     setup_logging(args.verbose)
@@ -162,12 +203,17 @@ def main():
 
     compliance = get_compliance_profile(args.compliance) if args.compliance else None
 
+    # Resolve workers: 0 = auto-detect, else use as-is (clamped to >=1 inside helpers)
+    workers = _resolve_workers(args.workers)
+
     print(f"=== HYGEIA Forensic-Grade PII Sanitization ===")
     print(f"Input:  {input_path}")
     print(f"Output: {output_path}")
     print(f"Mode:   {'DRY RUN' if args.dry_run else 'LIVE'}")
     if compliance:
         print(f"Compliance: {compliance.name}")
+    if workers > 1:
+        print(f"Workers: {workers} (parallel)")
     print()
 
     if not args.dry_run:
@@ -191,7 +237,7 @@ def main():
 
     # [2/7] Databases
     print("[2/7] Sanitizing databases...")
-    db_actions = sanitize_databases(work_path, scan_result, compliance, args.dry_run)
+    db_actions = sanitize_databases(work_path, scan_result, compliance, args.dry_run, workers=workers)
     all_actions.extend(db_actions)
     db_sanitized = sum(1 for a in db_actions if a.get("rows_redacted", 0) > 0)
     print(f"  Databases processed: {sum(1 for a in db_actions if 'sanitize' in a.get('action', ''))}")
@@ -199,7 +245,7 @@ def main():
 
     # [3/7] Text files
     print("[3/7] Sanitizing text files...")
-    text_actions = sanitize_all_text_files(work_path, dry_run=args.dry_run)
+    text_actions = sanitize_all_text_files(work_path, dry_run=args.dry_run, workers=workers)
     all_actions.extend(text_actions)
     text_count = sum(1 for a in text_actions if a.get("keys_redacted", 0) > 0 or
                      a.get("lines_redacted", 0) > 0 or a.get("cells_redacted", 0) > 0 or
@@ -236,7 +282,7 @@ def main():
     # [5b/7] Forensic hardening
     if not args.skip_forensic:
         print("[5b/7] Anti-forensic hardening...")
-        forensic_actions = forensic_clean_all(work_path, dry_run=args.dry_run)
+        forensic_actions = forensic_clean_all(work_path, dry_run=args.dry_run, workers=workers)
         all_actions.extend(forensic_actions)
         fc_deleted = sum(1 for a in forensic_actions if "delete" in a.get("action", "") and not a.get("dry_run"))
         fc_norm = next((a.get("files_normalized", 0) for a in forensic_actions if a.get("action") == "normalize_timestamps"), 0)

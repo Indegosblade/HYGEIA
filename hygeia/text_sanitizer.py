@@ -6,13 +6,26 @@ Reuses the same PII regex patterns as the SQLite sanitizer.
 """
 
 import csv
+import hashlib
 import io
 import json
 import logging
+import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 log = logging.getLogger("hygeia.text")
+
+
+def _sha256(filepath: Path) -> str:
+    """Return the SHA256 hex digest of a file's contents."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 
 PII_PATTERNS = {
     "email": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
@@ -161,6 +174,7 @@ def sanitize_json(filepath: Path) -> dict:
         "keys_redacted": 0,
     }
     try:
+        result["hash_before"] = _sha256(filepath)
         content = filepath.read_text(encoding="utf-8", errors="ignore")
         data = json.loads(content)
         redacted_keys = []
@@ -169,6 +183,7 @@ def sanitize_json(filepath: Path) -> dict:
             filepath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             result["keys_redacted"] = len(redacted_keys)
             log.info(f"JSON sanitized {filepath.name}: {len(redacted_keys)} keys redacted")
+        result["hash_after"] = _sha256(filepath)
     except (json.JSONDecodeError, OSError) as e:
         result["error"] = str(e)
     return result
@@ -182,6 +197,7 @@ def sanitize_log_file(filepath: Path) -> dict:
         "pii_types": [],
     }
     try:
+        result["hash_before"] = _sha256(filepath)
         content = filepath.read_text(encoding="utf-8", errors="ignore")
         lines = content.splitlines(keepends=True)
         new_lines = []
@@ -196,6 +212,7 @@ def sanitize_log_file(filepath: Path) -> dict:
             filepath.write_text("".join(new_lines), encoding="utf-8")
             result["pii_types"] = sorted(all_types)
             log.info(f"Log sanitized {filepath.name}: {result['lines_redacted']} lines")
+        result["hash_after"] = _sha256(filepath)
     except OSError as e:
         result["error"] = str(e)
     return result
@@ -208,11 +225,13 @@ def sanitize_csv(filepath: Path) -> dict:
         "cells_redacted": 0,
     }
     try:
+        result["hash_before"] = _sha256(filepath)
         content = filepath.read_text(encoding="utf-8", errors="ignore")
         dialect = csv.Sniffer().sniff(content[:4096])
         reader = csv.reader(io.StringIO(content), dialect)
         rows = list(reader)
         if not rows:
+            result["hash_after"] = _sha256(filepath)
             return result
 
         headers = [h.lower().strip() for h in rows[0]]
@@ -239,6 +258,7 @@ def sanitize_csv(filepath: Path) -> dict:
         if result["cells_redacted"] > 0:
             filepath.write_text(output.getvalue(), encoding="utf-8")
             log.info(f"CSV sanitized {filepath.name}: {result['cells_redacted']} cells")
+        result["hash_after"] = _sha256(filepath)
     except (csv.Error, OSError) as e:
         result["error"] = str(e)
     return result
@@ -274,41 +294,79 @@ def find_sanitizable_text_files(dump_path: Path) -> dict[str, list[Path]]:
     return found
 
 
-def sanitize_all_text_files(dump_path: Path, dry_run: bool = False) -> list[dict]:
-    """Sanitize all discoverable text files in a dump."""
+def sanitize_all_text_files(dump_path: Path, dry_run: bool = False,
+                             workers: int = 1) -> list[dict]:
+    """Sanitize all discoverable text files in a dump.
+
+    Args:
+        dump_path: Root directory to sanitize.
+        dry_run: If True, preview actions without executing.
+        workers: Number of parallel workers.  1 = sequential (default).
+                 0 = auto-detect (os.cpu_count()).  >1 = explicit pool size.
+    """
+    resolved_workers = workers if workers != 0 else (os.cpu_count() or 1)
+
     actions = []
     files = find_sanitizable_text_files(dump_path)
 
+    # Shell history is always sequential (fast + rare)
     for hist in files["history"]:
         if dry_run:
             actions.append({"action": "delete_shell_history", "path": str(hist), "dry_run": True})
         else:
             actions.append(delete_shell_history(hist))
 
-    for jf in files["json"]:
-        if jf.stat().st_size > 50 * 1024 * 1024:
-            continue
-        if dry_run:
+    # Build workload lists for the three parallelisable types
+    json_files = [jf for jf in files["json"] if jf.stat().st_size <= 50 * 1024 * 1024]
+    log_files = [lf for lf in files["log"] if lf.stat().st_size <= 10 * 1024 * 1024]
+    csv_files = [cf for cf in files["csv"] if cf.stat().st_size <= 50 * 1024 * 1024]
+
+    if dry_run:
+        for jf in json_files:
             actions.append({"action": "json_sanitize", "path": str(jf), "dry_run": True})
-        else:
+        for lf in log_files:
+            actions.append({"action": "log_sanitize", "path": str(lf), "dry_run": True})
+        for cf in csv_files:
+            actions.append({"action": "csv_sanitize", "path": str(cf), "dry_run": True})
+    elif resolved_workers > 1:
+        # Parallel: fan out all three types into one pool
+        all_tasks: list[tuple] = (
+            [(sanitize_json, f) for f in json_files] +
+            [(sanitize_log_file, f) for f in log_files] +
+            [(sanitize_csv, f) for f in csv_files]
+        )
+        total = len(all_tasks)
+        results: list[dict] = [None] * total  # type: ignore[list-item]
+        futures_map = {}
+        with ThreadPoolExecutor(max_workers=resolved_workers) as executor:
+            for idx, (fn, fp) in enumerate(all_tasks):
+                futures_map[executor.submit(fn, fp)] = idx
+            completed = 0
+            for future in as_completed(futures_map):
+                idx = futures_map[future]
+                completed += 1
+                result = future.result()
+                results[idx] = result
+                _, fp = all_tasks[idx]
+                log.info(f"Sanitizing text file {completed}/{total}: {fp.name}")
+        actions.extend(results)
+    else:
+        # Sequential
+        total_json = len(json_files)
+        for i, jf in enumerate(json_files):
+            log.info(f"Sanitizing JSON file {i + 1}/{total_json}: {jf.name}")
             actions.append(sanitize_json(jf))
 
-    for lf in files["log"]:
-        if lf.stat().st_size > 10 * 1024 * 1024:
-            continue
-        if dry_run:
-            actions.append({"action": "log_sanitize", "path": str(lf), "dry_run": True})
-        else:
+        total_log = len(log_files)
+        for i, lf in enumerate(log_files):
+            log.info(f"Sanitizing log file {i + 1}/{total_log}: {lf.name}")
             actions.append(sanitize_log_file(lf))
 
-    for cf in files["csv"]:
-        if cf.stat().st_size > 50 * 1024 * 1024:
-            continue
-        if dry_run:
-            actions.append({"action": "csv_sanitize", "path": str(cf), "dry_run": True})
-        else:
+        total_csv = len(csv_files)
+        for i, cf in enumerate(csv_files):
+            log.info(f"Sanitizing CSV file {i + 1}/{total_csv}: {cf.name}")
             actions.append(sanitize_csv(cf))
 
     log.info(f"Text sanitization: {len(files['history'])} history, "
-             f"{len(files['json'])} JSON, {len(files['log'])} log, {len(files['csv'])} CSV")
+             f"{len(json_files)} JSON, {len(log_files)} log, {len(csv_files)} CSV")
     return actions
