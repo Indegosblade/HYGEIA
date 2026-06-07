@@ -53,8 +53,6 @@ def generate_manifest(
     WARNING: This manifest may contain file paths that reveal personal data existed.
     It should be treated as LOCAL ONLY and never committed to git.
     """
-    from .scanner import FileAction
-
     from . import __version__
 
     manifest = {

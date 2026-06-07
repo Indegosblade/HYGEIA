@@ -9,7 +9,6 @@ Verifies that:
 """
 
 import hashlib
-import shutil
 import sqlite3
 import sys
 import tempfile
@@ -207,7 +206,6 @@ def test_deleted_file_hash_before_matches_original_content():
 def test_manifest_summary_files_with_hashes():
     """generate_manifest summary must count actions that carry hash_before or hash_after."""
     from hygeia.manifest import generate_manifest
-    from hygeia.scanner import ScanResult, JailbreakInfo
     from hygeia.verifier import VerificationResult
 
     # Minimal scan result stub

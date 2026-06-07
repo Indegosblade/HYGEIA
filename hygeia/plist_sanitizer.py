@@ -21,7 +21,7 @@ import plistlib
 import logging
 from pathlib import Path
 
-from hygeia.text_sanitizer import PII_PATTERNS, _redact_pii_in_string
+from hygeia.text_sanitizer import _redact_pii_in_string
 
 log = logging.getLogger("hygeia.plist")
 
