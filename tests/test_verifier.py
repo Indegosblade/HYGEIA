@@ -110,6 +110,52 @@ def test_system_dir_skip():
     import shutil; shutil.rmtree(d)
 
 
+# ── False-positive fix tests (fix/false-positives-vacuum) ────────────────────
+
+def test_gps_coord_above_180_is_false_positive():
+    """Memory sizes / version strings like 387.19343805 must not flag as GPS."""
+    assert _is_false_positive("data/bag_cache.plist", "gps_coord", "387.19343805") is True
+    assert _is_false_positive("data/bag_cache.plist", "gps_coord", "1024.00000000") is True
+
+
+def test_gps_coord_valid_range_is_not_false_positive():
+    """Real GPS coordinates within -180..180 must still be flagged."""
+    assert _is_false_positive("data/photos.db:ZASSET.ZLATITUDE", "gps_coord", "37.3382") is False
+    assert _is_false_positive("data/photos.db:ZASSET.ZLONGITUDE", "gps_coord", "-122.0322") is False
+
+
+def test_coredata_zpk_ssn_is_false_positive():
+    """CoreData Z_PK / ROWID sequence numbers that match SSN pattern are not SSNs."""
+    assert _is_false_positive("Calendar/Calendar.sqlitedb:CalendarItem.Z_PK", "ssn", "123456789") is True
+    assert _is_false_positive("Calendar/Calendar.sqlitedb:CalendarItem.Z_ENT", "ssn", "234567890") is True
+    assert _is_false_positive("Calendar/Calendar.sqlitedb:CalendarItem.Z_OPT", "ssn", "345678901") is True
+    assert _is_false_positive("Calendar/Calendar.sqlitedb:CalendarItem.rowid", "ssn", "456789012") is True
+
+
+def test_coredata_ssn_in_real_column_is_not_false_positive():
+    """An SSN-shaped value in a non-system column must still be flagged."""
+    assert _is_false_positive("data/contacts.db:Person.social_security", "ssn", "123-45-6789") is False
+
+
+def test_apple_ip_is_false_positive_in_verifier():
+    """Apple's 17/8 block should not fire as residual PII in the verifier."""
+    assert _is_false_positive("data/bag_cache.plist", "ip_v4", "17.188.141.22") is True
+    assert _is_false_positive("data/bag_cache.plist", "ip_v4", "17.0.0.1") is True
+
+
+def test_rfc1918_ip_is_false_positive_in_verifier():
+    """Private / loopback ranges should not fire in the verifier either."""
+    assert _is_false_positive("data/wifi_history.log", "ip_v4", "10.0.0.1") is True
+    assert _is_false_positive("data/wifi_history.log", "ip_v4", "172.16.5.3") is True
+    assert _is_false_positive("data/wifi_history.log", "ip_v4", "172.31.255.255") is True
+    assert _is_false_positive("data/wifi_history.log", "ip_v4", "192.168.1.100") is True
+
+
+def test_public_user_ip_is_not_false_positive():
+    """A non-Apple, non-private IP must still be flagged."""
+    assert _is_false_positive("data/cookies.db", "ip_v4", "93.184.216.34") is False
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = failed = 0

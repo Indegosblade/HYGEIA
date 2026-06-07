@@ -84,9 +84,43 @@ def test_delete_wal_orphans():
         assert not orphan_shm.exists()
 
 
+def test_vacuum_succeeds_after_connection_cleanup():
+    """
+    Simulate the Chrome Login Data scenario: sanitize_database must leave
+    zero free pages even when rows were deleted before the call.
+    The VACUUM fix (close all cursors, WAL checkpoint, retry) covers this.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "Login Data"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "CREATE TABLE logins "
+            "(id INTEGER PRIMARY KEY, username TEXT, password TEXT, origin_url TEXT)"
+        )
+        for i in range(200):
+            conn.execute(
+                "INSERT INTO logins VALUES (?, ?, ?, ?)",
+                (i, f"user{i}@example.com", f"secret{i}", f"https://site{i}.example.com"),
+            )
+        conn.commit()
+        conn.execute("DELETE FROM logins WHERE id > 10")
+        conn.commit()
+        conn.close()
+
+        result = sanitize_database(db_path, ["DELETE FROM logins"])
+        assert "error" not in result, f"sanitize_database raised: {result.get('error')}"
+
+        vconn = sqlite3.connect(str(db_path))
+        free_pages = vconn.execute("PRAGMA freelist_count").fetchone()[0]
+        vconn.close()
+        assert free_pages == 0, f"Expected 0 free pages after VACUUM, got {free_pages}"
+
+
 if __name__ == "__main__":
     test_checkpoint_and_prepare()
     test_sanitize_database()
     test_find_all_databases()
     test_delete_wal_orphans()
+    test_vacuum_succeeds_after_connection_cleanup()
     print("All tests passed.")
