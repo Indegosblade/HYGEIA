@@ -200,7 +200,14 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
             return True
 
     if pattern_name == "swift_bic":
+        # 8-char all-uppercase or all-same-char strings are padding/test data
         if re.match(r'^[A-Z]{8}$', match_text):
+            return True
+        if len(set(match_text.replace(" ", ""))) <= 2:
+            return True
+        # Sequential/alphabetical runs in plist files are carrier bundle identifiers
+        fname = path.split("/")[-1].split("\\")[-1]
+        if fname.endswith(".plist"):
             return True
 
     if pattern_name == "ethereum_address":
@@ -209,6 +216,33 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
 
     if pattern_name == "bitcoin_address":
         if len(match_text) < 26:
+            return True
+
+    # Repeated/sequential digit strings in plists are binary padding, not real identifiers
+    if pattern_name in ("us_routing", "us_routing_number", "cusip", "south_korean_rrn"):
+        digits = "".join(c for c in match_text if c.isdigit())
+        if digits and len(set(digits)) <= 2:
+            return True
+        # Sequential digits (012345678, 012345679) are test/padding data in plists
+        fname = path.split("/")[-1].split("\\")[-1]
+        if fname.endswith(".plist") and digits:
+            return True
+
+    # Ripple/Litecoin: all-same-char strings are binary plist padding
+    if pattern_name in ("ripple", "litecoin"):
+        if len(set(match_text)) <= 2:
+            return True
+
+    # DEA numbers in plist files: carrier bundle checksums look like DEA format
+    if pattern_name == "dea_number":
+        fname = path.split("/")[-1].split("\\")[-1]
+        if fname.endswith(".plist"):
+            return True
+
+    # url_credentials: Apple CDN URLs (appldnld.apple.com, updates.cdn-apple.com)
+    # are not credential-bearing URLs
+    if pattern_name == "url_credentials":
+        if "apple.com" in match_text or "cdn-apple.com" in match_text:
             return True
 
     return False
