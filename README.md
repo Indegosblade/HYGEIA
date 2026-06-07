@@ -44,6 +44,25 @@ hygeia --input /path/to/data --output /path/to/clean --compliance all --normaliz
 hygeia --input /path/to/data --output /path/to/clean -v --manifest audit.json
 ```
 
+### Pattern Selection
+
+```bash
+# Only strip image metadata (EXIF GPS, device identifiers)
+hygeia --input /path/to/data --output /clean --only exif
+
+# Only detect VINs and credit cards
+hygeia --input /path/to/data --output /clean --only vin,credit_card
+
+# Run everything except crypto wallet detection
+hygeia --input /path/to/data --output /clean --skip-patterns crypto
+
+# Only run identity + financial patterns (no credentials, no location, no healthcare)
+hygeia --input /path/to/data --output /clean --only identity,financial
+
+# List all available categories and patterns
+hygeia --list-patterns
+```
+
 ### Flags
 
 | Flag | Description |
@@ -52,6 +71,9 @@ hygeia --input /path/to/data --output /path/to/clean -v --manifest audit.json
 | `--output PATH`, `-o` | Destination for sanitized copy |
 | `--dry-run`, `-n` | Preview all actions without executing |
 | `--compliance MODE` | Compliance mode: `hipaa`, `gdpr`, `ccpa`, or `all` |
+| `--only PATTERNS` | Comma-separated categories or pattern names to activate exclusively |
+| `--skip-patterns PATTERNS` | Comma-separated categories or pattern names to exclude |
+| `--list-patterns` | Print all available categories and patterns, then exit |
 | `--normalize-timestamps` | Set all file timestamps to epoch (defeats timeline analysis) |
 | `--skip-verify` | Skip post-sanitization verification |
 | `--skip-exif` | Skip EXIF metadata stripping |
@@ -70,14 +92,14 @@ hygeia --input /path/to/data --output /path/to/clean -v --manifest audit.json
 
 ## Pipeline
 
-HYGEIA runs a deterministic 7-step pipeline on every invocation:
+HYGEIA runs a deterministic 7-stage pipeline on every invocation:
 
 ```
 [1/7] Scan          Classify every file by type. Auto-detect iOS or generic mode.
-[2/7] Databases     WAL-checkpoint → secure_delete → regex scan → table nuke → FTS rebuild → VACUUM
+[2/7] Databases     Platform detection → WAL-checkpoint → secure_delete → regex scan → table nuke → FTS rebuild → VACUUM
 [3/7] Text files    Redact PII in JSON, logs, CSV/TSV. Delete shell history files.
 [4/7] Forensics     Delete LevelDB stores, thumbnail caches, swap files, search indexes, session data.
-[5/7] EXIF          Strip GPS, device identifiers, and metadata from all images.
+[5/7] Media         Strip EXIF from images, metadata from PDFs (author/creator/producer), Office docs (docx/xlsx/pptx properties).
 [6/7] Verify        Regex scan all surviving text and database content for residual PII.
 [7/7] Manifest      Write JSON audit trail: actions taken, verification result, compliance report.
 ```
@@ -88,35 +110,50 @@ The pipeline is fail-safe: if verification finds residual PII, HYGEIA exits with
 
 ## What It Detects
 
-### Regex Patterns
+All patterns live in a single JSON source of truth (`hygeia/rules/pii_patterns.json`) organized into selectable categories. Each pattern can be activated individually or by category via `--only`/`--skip-patterns`.
 
-| Pattern | Coverage |
-|---------|----------|
-| Email addresses | RFC 5322 local-part + domain |
-| US phone numbers | 10-digit with optional +1, parentheses, separators |
-| International phone numbers | 20+ country codes (UK, DE, FR, IN, JP, AU, BR, CN, etc.) |
-| Social Security numbers | 3-2-4 format with exclusion of known invalid prefixes |
-| Credit card numbers | Visa, Mastercard, Amex, Discover with optional separators |
-| IPv4 addresses | Dotted quad, excluding localhost/broadcast |
-| IPv6 addresses | Full 8-group colon-hex notation |
-| IBAN | 2-letter country code + 2 check digits + 11-30 alphanumeric |
-| MAC addresses | Colon or hyphen separated hex pairs |
-| ZIP codes | Detected via column name (`zip`, `zipcode`, `postal_code`) |
+### Pattern Categories
+
+| Category | Patterns | Examples |
+|----------|----------|----------|
+| **Identity** | 12 | SSN, UK NIN, Indian PAN/Aadhaar, US passport, driver's license, Canadian SIN, Australian TFN, US ITIN, EIN |
+| **Location** | 4 | GPS coordinates, IPv4, IPv6, MAC addresses |
+| **Financial** | 6 | Credit cards, IBAN, SWIFT/BIC, US routing numbers, Bitcoin addresses, Ethereum addresses |
+| **Credentials** | 8 | AWS access keys, AWS secret keys, GitHub tokens, Slack tokens, JWT tokens, generic API keys, private key headers, password key-value pairs |
+| **Crypto** | 4 | Bitcoin (legacy + bech32), Ethereum, plus Monero/Solana/Cardano (context-dependent) |
+| **Healthcare** | 3 | NPI (standalone + context), DEA numbers, Medicare MBI |
+| **Vehicle** | 2 | VIN (17-char ISO 3779), UK license plates |
+
+### Context-Dependent Patterns
+
+Short digit sequences (9-10 digits) require nearby keywords to avoid false positives:
+
+| Pattern | Keywords Required | Window |
+|---------|-------------------|--------|
+| US passport | "passport" | 120 chars |
+| Driver's license | "license", "dl", "driver" | 120 chars |
+| Canadian SIN | "sin", "social insurance" | 120 chars |
+| Australian TFN | "tfn", "tax file" | 120 chars |
+| US routing number | "routing", "aba", "bank" | 120 chars |
+| Date of birth | "dob", "birth", "birthday" | 200 chars |
+| NPI | "npi", "provider", "prescriber" | 120 chars |
 
 ### Column-Name Detection
 
-50+ column names are treated as inherently sensitive regardless of content: `email`, `username`, `password`, `phone`, `address`, `street`, `city`, `zip`, `first_name`, `last_name`, `ssn`, `credit_card`, `latitude`, `longitude`, `api_key`, `token`, `cookie`, `session`, `encrypted_value`, and more. Any column matching these names has all non-empty values replaced with `[REDACTED]`.
+60+ column names treated as inherently sensitive regardless of content — any non-empty value replaced with `[REDACTED]`:
+
+`email`, `username`, `password`, `phone`, `address`, `street`, `city`, `zip`, `first_name`, `last_name`, `full_name`, `ssn`, `credit_card`, `latitude`, `longitude`, `api_key`, `token`, `cookie`, `session`, `encrypted_value`, `ip_address`, `remote_addr`, `mac_address`, `device_id`, `udid`, `serial_number`, `imei`, `account_number`, and more.
 
 ### Table-Level Nuking
 
-30+ table names across platforms are recognized as entirely PII — all rows deleted, schema preserved:
+80+ table names across platforms — all rows deleted, schema preserved:
 
-- **Chrome/Chromium**: `autofill`, `autofill_profiles`, `credit_cards`, `logins`, `cookies`, `omni_box_shortcuts`, `top_sites`, `keyword_search_terms`
-- **Firefox**: `moz_formhistory`, `moz_cookies`, `moz_inputhistory`, `moz_perms`
-- **Android**: `raw_contacts`, `data`, `calls`, `sms`, `threads`, `canonical_addresses`
-- **Messaging**: `chat_list`, `chat_view`, `message_thumbnails`
-- **macOS**: `access` (TCC.db)
-- **Generic**: `contacts`, `messages`, `call_log`, `accounts`, `search_history`
+- **Chrome/Chromium**: `autofill`, `autofill_profiles`, `credit_cards`, `logins`, `cookies`, `omni_box_shortcuts`, `top_sites`, `keyword_search_terms`, `downloads`
+- **Firefox**: `moz_formhistory`, `moz_cookies`, `moz_inputhistory`, `moz_perms`, `moz_hosts`, `moz_logins`, `webappsstore2`, `storage_sync_data`
+- **Android**: `raw_contacts`, `data`, `calls`, `sms`, `threads`, `canonical_addresses`, `siminfo`, `carriers`
+- **iOS**: `history_items`, `history_visits`, `zperson`, `zdetectedface`, `zdetectedfaceprint`, `zshare`, `zmemory`
+- **Windows**: `notification`
+- **Generic**: `contacts`, `messages`, `call_log`, `accounts`, `search_history`, `purchase_history`, `geolocation`, `location_history`
 
 ---
 
@@ -128,11 +165,11 @@ Jailbreak-aware scanning with dynamic detection of Dopamine, palera1n, and RootH
 
 ### Chrome / Chromium
 
-History, Login Data, Web Data, Cookies, Shortcuts, Top Sites, Favicons, DIPS, Network Action Predictor, Extension Cookies. LevelDB localStorage and IndexedDB directory deletion. Session data cleanup.
+History, Login Data, Web Data, Cookies, Shortcuts, Top Sites, Favicons, DIPS, Network Action Predictor, Extension Cookies, Affiliation Database, Media History. Auto-detected by table signature — Login Data is nuked differently than History. LevelDB localStorage and IndexedDB directory deletion. Session data cleanup.
 
 ### Firefox
 
-places.sqlite, cookies.sqlite, formhistory.sqlite, permissions.sqlite, content-prefs.sqlite, webappsstore.sqlite. IndexedDB storage directory deletion. Session restore file deletion. Cache cleanup.
+places.sqlite, cookies.sqlite, formhistory.sqlite, permissions.sqlite, content-prefs.sqlite, key4.db, cert9.db, signons.sqlite, webappsstore.sqlite. Auto-detected by `moz_*` table presence. IndexedDB storage directory deletion. Session restore file deletion. Cache cleanup.
 
 ### Android
 
@@ -218,15 +255,26 @@ from hygeia.sqlite_sanitizer import sanitize_database_generic
 result = sanitize_database_generic(Path("any_database.db"))
 print(f"Redacted {result['rows_redacted']} rows, found: {result['pii_types_found']}")
 
+# Platform-aware database sanitization (auto-detects Chrome, Firefox, iOS, etc.)
+from hygeia.platform_handlers import sanitize_with_platform_detection
+result = sanitize_with_platform_detection(Path("Login Data"))
+print(f"Platform: {result.get('platform', 'generic')}, deleted: {result['rows_deleted']}")
+
 # Text file sanitization
 from hygeia.text_sanitizer import sanitize_json, sanitize_log_file, sanitize_csv
 sanitize_json(Path("config.json"))
 sanitize_log_file(Path("app.log"))
 
-# iOS-specific database sanitization
-from hygeia.sqlite_sanitizer import sanitize_knowledgec, sanitize_photos_sqlite
-sanitize_knowledgec(Path("knowledgeC.db"))
-sanitize_photos_sqlite(Path("Photos.sqlite"))
+# Pattern registry — configure which patterns are active
+from hygeia.patterns import load_patterns, list_available
+registry = load_patterns(only=["identity", "financial"])  # category filter
+registry = load_patterns(skip=["crypto"])                 # exclude a category
+print(list_available())                                   # all categories + pattern names
+
+# Selective text sanitization
+from hygeia import text_sanitizer
+text_sanitizer.configure(only=["vin", "credit_card"])     # only these two patterns
+sanitize_log_file(Path("fleet_records.log"))
 
 # Forensic artifact cleanup
 from hygeia.filesystem_sanitizer import sanitize_filesystem
@@ -278,17 +326,24 @@ To skip EXIF stripping intentionally (e.g. in environments without exiftool), pa
 
 ```
 hygeia/
+├── cli.py                   7-stage pipeline orchestrator + CLI argument handling
 ├── scanner.py               File classification engine (DELETE/PRESERVE/SELECTIVE_DB/PLIST/EXIF)
-├── sqlite_sanitizer.py      WAL-aware database sanitization — iOS-specific + generic PII scanner
-├── text_sanitizer.py         JSON, log, CSV/TSV sanitization + shell history deletion
-├── filesystem_sanitizer.py   Forensic artifact removal — LevelDB, caches, swap, indexes
-├── plist_sanitizer.py        Binary plist credential redaction (recursive key-walk)
-├── exif_stripper.py          Image metadata removal via exiftool (9 formats)
-├── compliance.py             HIPAA/GDPR/CCPA compliance profiles + coverage reporting
-├── verifier.py               Post-sanitization PII verification (regex + freelist + EXIF)
-├── manifest.py               JSON audit trail generation
+├── patterns.py              Central pattern registry — loads pii_patterns.json, compiles regexes, filters by --only/--skip
+├── sqlite_sanitizer.py      WAL-aware database sanitization — checkpoint → secure_delete → scan → VACUUM
+├── platform_handlers.py     20 schema-aware handlers (Chrome, Firefox, iOS, Android, Windows) with auto-detection
+├── text_sanitizer.py        JSON, log, CSV/TSV sanitization + shell history deletion
+├── filesystem_sanitizer.py  Forensic artifact removal — LevelDB, caches, swap, indexes
+├── forensic_cleaner.py      Anti-forensic hardening — slack space, ADS, extended attributes
+├── plist_sanitizer.py       Binary plist credential redaction (recursive key-walk)
+├── exif_stripper.py         Image metadata removal via exiftool (9 formats)
+├── pdf_stripper.py          PDF metadata stripping (author, creator, producer, keywords)
+├── office_stripper.py       Office document metadata removal (docx/xlsx/pptx XML properties)
+├── compliance.py            HIPAA/GDPR/CCPA compliance profiles + coverage reporting
+├── verifier.py              Post-sanitization PII verification (regex + freelist + EXIF)
+├── manifest.py              JSON audit trail generation
 └── rules/
-    ├── delete_patterns.json       33 directory + 18 database + 10 extension patterns
+    ├── pii_patterns.json          Single source of truth — 40+ regex patterns in 7 categories
+    ├── delete_patterns.json       34 directory + 40 database + 10 extension patterns
     ├── preserve_patterns.json     18 directory + 5 file + 4 extension rules
     ├── selective_db_rules.json    Column-level SQL for knowledgeC, Photos.sqlite, TCC.db
     └── plist_patterns.json        29 sensitive key patterns + path-based rules
