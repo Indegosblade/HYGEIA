@@ -9,7 +9,6 @@
   "always_sanitize_files": [
     "com.apple.identityservices.idstatuscache.plist",
     "com.apple.mobilephone.plist",
-    "com.apple.wifi.plist",
     "data_ark.plist",
     "com.apple.commcenter.data.plist"
   ],

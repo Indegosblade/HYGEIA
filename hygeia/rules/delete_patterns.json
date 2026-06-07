@@ -52,6 +52,12 @@
     "cache_encryptedA.db",
     "cache_encryptedB.db"
   ],
+  "plist_delete_files": [
+    "com.apple.wifi.plist",
+    "com.apple.wifi.known-networks.plist",
+    "com.apple.wifi-private-mac-oui-data.plist",
+    "com.apple.wifi.sharing.plist"
+  ],
   "extension_patterns": [
     {"ext": ".jpg", "scope": "/var/mobile/"},
     {"ext": ".jpeg", "scope": "/var/mobile/"},
