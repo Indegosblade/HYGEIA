@@ -36,15 +36,8 @@ def configure(only: list[str] | None = None, skip: list[str] | None = None):
     _registry = load_patterns(only=only, skip=skip)
 
 
-# Module-level dicts for backward compatibility (tests import these directly).
-# Populated eagerly from the registry on first import.
 PII_PATTERNS = _get_registry().regex_patterns
-CONTEXT_PATTERNS = {
-    name: (pat, kws, win)
-    for name, (pat, kws, win) in _get_registry().context_patterns.items()
-}
-
-# Context patterns loaded from registry at scan time via _get_registry().context_patterns
+CONTEXT_PATTERNS = _get_registry().context_patterns
 
 # File extensions that can contain readable text
 TEXT_SCANNABLE = {
@@ -202,75 +195,21 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
 
     # ── New pattern false-positive filters ────────────────────────────────────
 
-    # VIN: 17-char uppercase sequences in hex-like data (SHA hashes, UUIDs,
-    # bundle IDs, kernel addresses) will collide. Suppress when the match
-    # looks like a longer hex run or UUID fragment.
     if pattern_name == "vin":
-        # If surrounded by more hex chars it's likely a hash/address
-        import re as _re
-        if _re.search(r'[0-9A-Fa-f]{17,}', match_text):
+        if re.search(r'[0-9A-Fa-f]{17,}', match_text):
             return True
 
-    # SWIFT/BIC: many 8-char uppercase words in bundle/framework names look
-    # like BIC codes (e.g. "ABCDEFGH"). Only treat as real when it contains
-    # at least one digit in positions 7-8 or the optional suffix — that
-    # distinguishes financial codes from random all-alpha strings.
     if pattern_name == "swift_bic":
-        # Must not be purely alphabetical (real BIC has digits in chars 7-8)
-        import re as _re
-        if _re.match(r'^[A-Z]{8}$', match_text):
-            # All-alpha 8-char string — too noisy, suppress unless it looks
-            # like a known SWIFT country+bank pattern (hard to verify without
-            # a lookup table, so suppress the all-alpha case)
+        if re.match(r'^[A-Z]{8}$', match_text):
             return True
 
-    # Ethereum address: suppress 0x + 40 hex that are clearly kernel
-    # addresses (< 0x100000000 after prefix) — i.e. 32-bit values zero-padded
     if pattern_name == "ethereum_address":
-        hex_val = match_text[2:]  # strip 0x
-        # If the first 24 chars are all zeros it's a padded small integer
-        if hex_val.startswith("000000000000000000000000"):
+        if match_text[2:].startswith("000000000000000000000000"):
             return True
 
-    # Bitcoin address: skip matches that are clearly short hash fragments or
-    # base58-looking sequences inside longer strings (word boundary helps but
-    # add an extra length sanity check)
     if pattern_name == "bitcoin_address":
         if len(match_text) < 26:
             return True
-
-    # GitHub token: suppress if the token value looks like a UUID or other
-    # structured internal identifier (all-lowercase, no underscores)
-    # — real GH tokens always have the prefix enforced by the regex so this
-    # is just an extra guard.
-    if pattern_name == "github_token":
-        # Already constrained by prefix in regex; no additional filtering needed
-        pass
-
-    # AWS access key: real AKIA keys have mixed case — pure uppercase runs in
-    # binary data sometimes trigger; if it matches inside a longer all-caps run
-    # suppress it.
-    if pattern_name == "aws_access_key":
-        pass  # regex is tight enough (AKIA prefix + exactly 16 UPPERCASE/digit)
-
-    # DEA number: two letters + 7 digits also matches abbreviated identifiers.
-    # Suppress all-uppercase first-two-letter combos that are common English
-    # abbreviations (e.g. "IN1234567" = Indiana prefix + ZIP).
-    if pattern_name == "dea_number":
-        # The first two letters must follow DEA format: letter in A-Z, letter in A-Z9
-        # If the match is entirely within a longer word, suppress
-        pass  # word boundaries already enforced by regex
-
-    # UK NIN: a lot of database column names and config tokens in ASCII uppercase
-    # also match 2-letter + 6-digit + 1-letter. Require that the file extension
-    # is a data file (not .plist/.json system config) or the match has a space/
-    # hyphen structure (real NINs are usually written AA999999A or AA 99 99 99 A).
-    if pattern_name == "uk_nin":
-        pass  # regex enforces character class restrictions; accept all matches
-
-    # Medicare MBI: very tight pattern — 11 specific positions. Low collision risk.
-    if pattern_name == "medicare_mbi":
-        pass
 
     return False
 
