@@ -222,6 +222,15 @@ def main():
     parser.add_argument("--skip-verify", action="store_true", help="Skip post-sanitization verification")
     parser.add_argument("--skip-exif", action="store_true", help="Skip EXIF metadata stripping")
     parser.add_argument("--skip-forensic", action="store_true", help="Skip anti-forensic hardening (LevelDB, caches, swap, timestamps)")
+    parser.add_argument("--only", type=str, default=None,
+                        help="Only run specific pattern categories or individual patterns (comma-separated). "
+                             "Categories: identity, location, financial, credentials, crypto, healthcare, vehicle. "
+                             "Example: --only exif  or  --only vin,credit_card  or  --only financial,credentials")
+    parser.add_argument("--skip-patterns", type=str, default=None,
+                        help="Skip specific pattern categories (comma-separated). "
+                             "Example: --skip-patterns crypto,vehicle")
+    parser.add_argument("--list-patterns", action="store_true",
+                        help="List all available pattern categories and exit")
     parser.add_argument("--optimize", action="store_true", help="Remove localizations and caches")
     parser.add_argument("--manifest", "-m", help="Custom path for audit manifest")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
@@ -236,8 +245,36 @@ def main():
     )
     args = parser.parse_args()
 
+    # --list-patterns: show available categories and exit
+    if args.list_patterns:
+        from .patterns import list_available
+        available = list_available()
+        print("Available PII pattern categories:\n")
+        for cat, patterns in available.items():
+            if cat.startswith("_"):
+                print(f"  {cat[1:]} (context-dependent):")
+            else:
+                print(f"  {cat}:")
+            for p in patterns:
+                print(f"    - {p}")
+            print()
+        print("Usage:")
+        print("  hygeia --input ./data --output ./clean --only identity,financial")
+        print("  hygeia --input ./data --output ./clean --skip-patterns crypto")
+        print("  hygeia --input ./data --output ./clean --only exif  # EXIF stripping only")
+        sys.exit(0)
+
     setup_logging(args.verbose)
     start_time = time.time()
+
+    # Configure pattern filtering (--only / --skip-patterns)
+    pattern_only = [s.strip() for s in args.only.split(",")] if args.only else None
+    pattern_skip = [s.strip() for s in args.skip_patterns.split(",")] if args.skip_patterns else None
+
+    if pattern_only or pattern_skip:
+        from . import text_sanitizer, verifier
+        text_sanitizer.configure(only=pattern_only, skip=pattern_skip)
+        verifier.configure(only=pattern_only, skip=pattern_skip)
 
     # Warn early if exiftool is missing so the user sees it before the pipeline runs
     if not args.skip_exif and find_exiftool() is None:

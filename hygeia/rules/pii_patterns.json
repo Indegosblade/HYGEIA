@@ -1,0 +1,435 @@
+{
+  "_comment": "HYGEIA PII pattern registry. Single source of truth. Categories are selectable via --only/--skip CLI flags.",
+  "categories": {
+    "identity": {
+      "description": "Personal identity patterns — emails, phones, government IDs",
+      "patterns": {
+        "email": {
+          "regex": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b",
+          "description": "Email addresses (RFC 5322 local-part + domain)",
+          "flags": []
+        },
+        "phone_us": {
+          "regex": "\\b(?:\\+?1[-\\.\\s]?)?\\(?[2-9]\\d{2}\\)?[-\\.\\s]?\\d{3}[-\\.\\s]?\\d{4}\\b",
+          "description": "US phone numbers (10-digit with optional +1, parens, separators)",
+          "flags": []
+        },
+        "phone_intl": {
+          "regex": "\\+(?:44|49|33|91|81|61|86|55|7|34|39|82|31|46|47|48|90|52|62|63|65|66|84|20|27|234|254|971|972|974|966)\\s?\\d[\\d\\s\\-]{6,14}\\d\\b",
+          "description": "International phone numbers (30+ country codes)",
+          "flags": []
+        },
+        "ssn": {
+          "regex": "\\b(?!000|666|9\\d{2})[0-8]\\d{2}[-\\s]?\\d{2}[-\\s]?\\d{4}\\b",
+          "description": "US Social Security numbers (3-2-4 with exclusion of invalid prefixes)",
+          "flags": []
+        },
+        "uk_nin": {
+          "regex": "\\b(?!BG|GB|NK|KN|TN|NT|ZZ)[A-CEGHJ-PR-TW-Z][A-CEGHJ-NPR-TW-Z]\\s?\\d{2}\\s?\\d{2}\\s?\\d{2}\\s?[A-D]\\b",
+          "description": "UK National Insurance Number",
+          "flags": []
+        },
+        "indian_pan": {
+          "regex": "\\b[A-Z]{5}\\d{4}[A-Z]\\b",
+          "description": "Indian PAN card (5 uppercase letters, 4 digits, 1 letter)",
+          "flags": []
+        },
+        "indian_aadhaar": {
+          "regex": "\\b\\d{4}[-\\s]\\d{4}[-\\s]\\d{4}\\b",
+          "description": "Indian Aadhaar (12 digits in 4-4-4 groups with separators)",
+          "flags": []
+        },
+        "us_itin": {
+          "regex": "\\b9\\d{2}[-\\s]?[7-9]\\d[-\\s]?\\d{4}\\b",
+          "description": "US Individual Taxpayer ID (9XX-[7-9]X-XXXX)",
+          "flags": []
+        },
+        "brazilian_cpf": {
+          "regex": "\\b\\d{3}\\.\\d{3}\\.\\d{3}-\\d{2}\\b",
+          "description": "Brazilian CPF (XXX.XXX.XXX-XX)",
+          "flags": []
+        },
+        "mexican_curp": {
+          "regex": "\\b[A-Z]{4}\\d{6}[HM][A-Z]{5}[A-Z0-9]\\d\\b",
+          "description": "Mexican CURP (18 chars: 4 letters + 6 digits + gender + 5 letters + check)",
+          "flags": []
+        },
+        "south_korean_rrn": {
+          "regex": "\\b\\d{6}[-\\s]?[1-4]\\d{6}\\b",
+          "description": "South Korean Resident Registration Number (YYMMDD-GXXXXXX)",
+          "flags": []
+        },
+        "sin_tfn": {
+          "regex": "\\b\\d{3}[-\\s]\\d{3}[-\\s]\\d{3}\\b",
+          "description": "Canadian SIN / Australian TFN (9 digits in 3-3-3 groups)",
+          "flags": []
+        },
+        "japanese_my_number": {
+          "regex": "\\b\\d{4}[-\\s]\\d{4}[-\\s]\\d{4}\\b",
+          "description": "Japanese My Number (12 digits in 4-4-4 groups)",
+          "flags": []
+        },
+        "imei": {
+          "regex": "\\b\\d{2}[-\\s]?\\d{6}[-\\s]?\\d{6}[-\\s]?\\d\\b",
+          "description": "IMEI device identifier (15 digits with optional separators)",
+          "flags": []
+        },
+        "imsi": {
+          "regex": "\\b\\d{3}\\d{2,3}\\d{9,10}\\b",
+          "description": "IMSI subscriber identity (MCC+MNC+MSIN, 14-15 digits)",
+          "flags": []
+        },
+        "device_name": {
+          "regex": "\\b\\w+'s\\s+(?:iPhone|iPad|iPod|Mac|Apple Watch|MacBook|iMac)\\b",
+          "description": "Apple device names with possessive (Kevin's iPhone)",
+          "flags": ["IGNORECASE"]
+        },
+        "apple_id": {
+          "regex": "\\b\\S+@(?:icloud|me|mac)\\.com\\b",
+          "description": "Apple ID email addresses",
+          "flags": ["IGNORECASE"]
+        }
+      }
+    },
+    "location": {
+      "description": "Geographic and location data",
+      "patterns": {
+        "gps_coord": {
+          "regex": "-?\\d{2,3}\\.\\d{4,}",
+          "description": "GPS coordinates (latitude/longitude with 4+ decimal places)",
+          "flags": []
+        },
+        "ip_v4": {
+          "regex": "\\b(?!(?:0|127|255)\\.)\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",
+          "description": "IPv4 addresses (excluding localhost/broadcast)",
+          "flags": []
+        },
+        "ip_v6": {
+          "regex": "\\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\\b",
+          "description": "IPv6 addresses (full 8-group notation)",
+          "flags": []
+        },
+        "mac_addr": {
+          "regex": "\\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\\b",
+          "description": "MAC addresses (colon or hyphen separated hex pairs)",
+          "flags": []
+        }
+      }
+    },
+    "financial": {
+      "description": "Financial identifiers — cards, bank accounts, tax IDs",
+      "patterns": {
+        "credit_card": {
+          "regex": "\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2})|3(?:0[0-5]|[68]\\d)\\d|(?:2131|1800|35\\d{2})|62\\d{2})[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{3,4}(?:[- ]?\\d{3})?\\b",
+          "description": "Credit cards (Visa, MC, Amex, Discover, Diners, JCB, UnionPay)",
+          "flags": []
+        },
+        "iban": {
+          "regex": "\\b[A-Z]{2}\\d{2}[A-Z0-9]{11,30}\\b",
+          "description": "IBAN (2-letter country + 2 check digits + 11-30 alphanumeric)",
+          "flags": []
+        },
+        "swift_bic": {
+          "regex": "\\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\\b",
+          "description": "SWIFT/BIC codes (8 or 11 characters)",
+          "flags": []
+        },
+        "us_ein": {
+          "regex": "\\b\\d{2}-\\d{7}\\b",
+          "description": "US Employer Identification Number (XX-XXXXXXX format)",
+          "flags": []
+        },
+        "us_routing": {
+          "regex": "\\b(?:0[1-9]|[12]\\d|3[0-2])\\d{7}\\b",
+          "description": "US ABA routing numbers (valid leading digit ranges)",
+          "flags": []
+        },
+        "cusip": {
+          "regex": "\\b[0-9]{3}[A-Z0-9]{3}[0-9]{2}[0-9A-Z]\\b",
+          "description": "CUSIP securities identifier (9 chars: 6 issuer + 2 issue + 1 check)",
+          "flags": []
+        },
+        "isin": {
+          "regex": "\\b[A-Z]{2}[A-Z0-9]{9}\\d\\b",
+          "description": "ISIN international securities (2-letter country + 9 alphanum + check digit)",
+          "flags": []
+        }
+      }
+    },
+    "credentials": {
+      "description": "API keys, tokens, secrets, passwords",
+      "patterns": {
+        "jwt_token": {
+          "regex": "\\beyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}",
+          "description": "JWT tokens (three base64url segments, header starts eyJ)",
+          "flags": []
+        },
+        "aws_access_key": {
+          "regex": "\\b(?:AKIA|ASIA)[A-Z0-9]{16}\\b",
+          "description": "AWS Access Key IDs (AKIA/ASIA + 16 uppercase alphanumeric)",
+          "flags": []
+        },
+        "github_token": {
+          "regex": "\\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{36,255}\\b",
+          "description": "GitHub tokens (PAT, OAuth, App, Refresh)",
+          "flags": []
+        },
+        "gitlab_token": {
+          "regex": "\\bglpat-[A-Za-z0-9_-]{20,}\\b",
+          "description": "GitLab personal access tokens",
+          "flags": []
+        },
+        "slack_token": {
+          "regex": "\\bxox[bpras]-[0-9a-zA-Z-]{10,}\\b",
+          "description": "Slack tokens (bot, user, app, refresh)",
+          "flags": []
+        },
+        "stripe_key": {
+          "regex": "\\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{20,}\\b",
+          "description": "Stripe API keys (secret, publishable, restricted)",
+          "flags": []
+        },
+        "openai_key": {
+          "regex": "\\bsk-[A-Za-z0-9]{20,}\\b",
+          "description": "OpenAI API keys",
+          "flags": []
+        },
+        "twilio_sid": {
+          "regex": "\\bAC[0-9a-f]{32}\\b",
+          "description": "Twilio Account SIDs",
+          "flags": []
+        },
+        "sendgrid_key": {
+          "regex": "\\bSG\\.[A-Za-z0-9_-]{22}\\.[A-Za-z0-9_-]{43}\\b",
+          "description": "SendGrid API keys",
+          "flags": []
+        },
+        "npm_token": {
+          "regex": "\\bnpm_[A-Za-z0-9]{36}\\b",
+          "description": "npm access tokens",
+          "flags": []
+        },
+        "pypi_token": {
+          "regex": "\\bpypi-[A-Za-z0-9_-]{50,}\\b",
+          "description": "PyPI API tokens",
+          "flags": []
+        },
+        "docker_token": {
+          "regex": "\\bdckr_pat_[A-Za-z0-9_-]{20,}\\b",
+          "description": "Docker Hub personal access tokens",
+          "flags": []
+        },
+        "digitalocean_token": {
+          "regex": "\\bdop_v1_[0-9a-f]{64}\\b",
+          "description": "DigitalOcean personal access tokens",
+          "flags": []
+        },
+        "shopify_token": {
+          "regex": "\\bshp(?:at|ca|pa|ss)_[0-9a-fA-F]{32,}\\b",
+          "description": "Shopify API tokens (admin, custom app, private, storefront)",
+          "flags": []
+        },
+        "telegram_bot": {
+          "regex": "\\b\\d{8,10}:[A-Za-z0-9_-]{35}\\b",
+          "description": "Telegram bot tokens (numeric ID + 35-char secret)",
+          "flags": []
+        },
+        "generic_api_key": {
+          "regex": "\\b(?:sk|pk)[-_](?:live|test|prod)[-_][A-Za-z0-9]{20,}\\b",
+          "description": "Generic prefixed API keys (sk_live_, pk_test_, etc.)",
+          "flags": []
+        },
+        "url_credentials": {
+          "regex": "\\b(?:https?|ftp|postgres|mongodb|mysql|redis|amqp)://[^:@\\s]+:[^@\\s]+@[^\\s]+",
+          "description": "URLs with embedded credentials (user:pass@host)",
+          "flags": []
+        },
+        "private_key_header": {
+          "regex": "-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----",
+          "description": "Private key PEM headers (RSA, EC, DSA, OpenSSH, PGP)",
+          "flags": []
+        }
+      }
+    },
+    "crypto": {
+      "description": "Cryptocurrency wallet addresses",
+      "patterns": {
+        "bitcoin_address": {
+          "regex": "\\b(?:[13][1-9A-HJ-NP-Za-km-z]{25,34}|bc1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{25,87})\\b",
+          "description": "Bitcoin addresses (legacy P2PKH/P2SH + bech32 segwit/taproot)",
+          "flags": []
+        },
+        "ethereum_address": {
+          "regex": "\\b0x[0-9a-fA-F]{40}\\b",
+          "description": "Ethereum addresses (0x + 40 hex chars)",
+          "flags": []
+        },
+        "litecoin": {
+          "regex": "\\b[LM3][1-9A-HJ-NP-Za-km-z]{25,34}\\b",
+          "description": "Litecoin addresses (L/M legacy, 3 P2SH)",
+          "flags": []
+        },
+        "ripple": {
+          "regex": "\\br[1-9A-HJ-NP-Za-km-z]{24,34}\\b",
+          "description": "Ripple/XRP addresses (r + base58)",
+          "flags": []
+        },
+        "monero": {
+          "regex": "\\b4[0-9AB][1-9A-HJ-NP-Za-km-z]{93}\\b",
+          "description": "Monero addresses (4 + 94 base58 chars)",
+          "flags": []
+        },
+        "solana": {
+          "regex": "\\b[1-9A-HJ-NP-Za-km-z]{32,44}\\b",
+          "description": "Solana addresses (base58, 32-44 chars)",
+          "flags": [],
+          "context_keywords": ["solana", "sol", "wallet", "phantom"],
+          "context_window": 120
+        },
+        "cardano": {
+          "regex": "\\baddr1[0-9a-z]{58,}\\b",
+          "description": "Cardano Shelley addresses (addr1...)",
+          "flags": []
+        }
+      }
+    },
+    "healthcare": {
+      "description": "Medical and healthcare identifiers (HIPAA-relevant)",
+      "patterns": {
+        "npi": {
+          "regex": "\\b(?:80840)?[12]\\d{9}\\b",
+          "description": "National Provider Identifier (10 digits, starts with 1 or 2, optional 80840 prefix)",
+          "flags": []
+        },
+        "dea_number": {
+          "regex": "\\b[ABCDEFGHJKLMNPRSTUXabcdefghjklmnprstux][A-Za-z9]\\d{7}\\b",
+          "description": "DEA registration numbers (registrant type letter + name letter + 7 digits)",
+          "flags": []
+        },
+        "medicare_mbi": {
+          "regex": "\\b\\d[A-Z][A-Z0-9]\\d[A-Z][A-Z0-9]\\d[A-Z]{2}\\d{2}\\b",
+          "description": "Medicare Beneficiary Identifier (position-specific letter/digit rules)",
+          "flags": []
+        },
+        "ndc": {
+          "regex": "\\b\\d{4,5}-\\d{3,4}-\\d{1,2}\\b",
+          "description": "National Drug Code (4-4-2, 5-3-2, or 5-4-1 format)",
+          "flags": [],
+          "context_keywords": ["ndc", "drug", "medication", "prescription", "pharmaceutical"],
+          "context_window": 120
+        }
+      }
+    },
+    "vehicle": {
+      "description": "Vehicle identification",
+      "patterns": {
+        "vin": {
+          "regex": "\\b[A-HJ-NPR-Z0-9]{3}[A-HJ-NPR-Z0-9]{5}[0-9X][A-HJ-NPR-Z0-9]{2}[0-9]{6}\\b",
+          "description": "Vehicle Identification Number (17 chars, no I/O/Q, check digit at pos 9)",
+          "flags": []
+        },
+        "uk_plate": {
+          "regex": "\\b[A-Z]{2}\\d{2}\\s?[A-Z]{3}\\b",
+          "description": "UK vehicle registration (post-2001 format: XX00 XXX)",
+          "flags": [],
+          "context_keywords": ["plate", "registration", "vehicle", "car", "reg"],
+          "context_window": 120
+        }
+      }
+    }
+  },
+  "context_patterns": {
+    "_comment": "Patterns that require nearby keywords to fire (reduces false positives on short digit sequences)",
+    "us_passport": {
+      "regex": "\\b[A-Z]?\\d{9}\\b",
+      "description": "US Passport number (letter + 9 digits or just 9 digits)",
+      "keywords": ["passport"],
+      "window": 120
+    },
+    "drivers_license": {
+      "regex": "\\b(?:[A-Z]\\d{12}|[A-Z]\\d{7}|\\d{8,9})\\b",
+      "description": "US driver's license (state-variable formats: CA, NY, TX, FL)",
+      "keywords": ["license", "dl ", " dl", "driver"],
+      "window": 120
+    },
+    "canadian_sin": {
+      "regex": "\\b\\d{3}[-\\s]\\d{3}[-\\s]\\d{3}\\b",
+      "description": "Canadian Social Insurance Number (3-3-3 digits)",
+      "keywords": ["sin", "social insurance", "canadian"],
+      "window": 120
+    },
+    "australian_tfn": {
+      "regex": "\\b\\d{3}[-\\s]\\d{3}[-\\s]\\d{3}\\b",
+      "description": "Australian Tax File Number (3-3-3 digits)",
+      "keywords": ["tfn", "tax file", "australian"],
+      "window": 120
+    },
+    "us_routing_number": {
+      "regex": "\\b\\d{9}\\b",
+      "description": "US ABA routing number (9 digits, needs context)",
+      "keywords": ["routing", "aba", "bank"],
+      "window": 120
+    },
+    "date_of_birth": {
+      "regex": "(?:DOB|Date\\s+of\\s+Birth|Birthday|birth_?date)\\s*[:=]?\\s*(?:\\d{4}[/\\-\\.]\\d{1,2}[/\\-\\.]\\d{1,2}|\\d{1,2}[/\\-\\.]\\d{1,2}[/\\-\\.]\\d{2,4})",
+      "description": "Date of birth with label (DOB: MM/DD/YYYY or YYYY-MM-DD)",
+      "keywords": ["dob", "birth", "birthday"],
+      "window": 200,
+      "flags": ["IGNORECASE"]
+    },
+    "password_kv": {
+      "regex": "\\b(?:password|passwd|pwd)\\s*[:=]\\s*\\S+",
+      "description": "Password in key=value or key: value format",
+      "keywords": ["password", "passwd", "pwd"],
+      "window": 200,
+      "flags": ["IGNORECASE"]
+    },
+    "aws_secret_key": {
+      "regex": "\\b[A-Za-z0-9/+=]{40}\\b",
+      "description": "AWS secret access key (40-char base64, needs context)",
+      "keywords": ["aws", "secret", "AWS_SECRET"],
+      "window": 120
+    },
+    "npi": {
+      "regex": "\\b\\d{10}\\b",
+      "description": "National Provider Identifier (10 digits with healthcare context)",
+      "keywords": ["npi", "provider", "national provider", "prescriber", "clinician"],
+      "window": 120
+    }
+  },
+  "sensitive_columns": {
+    "_comment": "Column names treated as inherently sensitive regardless of content. Values replaced with [REDACTED].",
+    "identity": ["email", "username", "user_name", "login", "password", "passwd", "phone", "phone_number", "mobile", "cell", "fax", "first_name", "last_name", "full_name", "name", "display_name", "firstname", "lastname", "fullname", "nickname", "given_name", "family_name"],
+    "address": ["address", "street", "city", "zip", "zipcode", "zip_code", "postal_code", "state", "country", "street_address", "street_number", "address_line_1", "address_line_2", "apt", "suite", "company_name", "company", "employer", "organization"],
+    "credentials": ["username_value", "username_element", "password_value", "account", "account_name", "credential", "token", "auth", "secret", "api_key", "apikey", "cookie", "session", "access_token", "refresh_token", "id_token", "bearer", "client_secret", "oauth_token", "private_key"],
+    "financial": ["card_number", "card_holder", "cardholder", "expiration", "cvv", "routing_number", "routing", "bank_account", "account_number", "swift", "bic", "swift_code", "bic_code", "sin", "tfn", "salary", "income", "wage", "purchase_history", "ssn", "social_security", "tax_id", "ein", "itin"],
+    "government_id": ["passport", "passport_number", "drivers_license", "license_number", "national_id", "insurance_number", "policy_number"],
+    "healthcare": ["patient_id", "mrn", "medical_record", "npi", "dea_number", "diagnosis", "diagnosis_code", "prescription", "medication", "date_of_birth", "dob", "birthdate", "birthday", "health_plan_id", "member_id", "subscriber_id"],
+    "location": ["latitude", "longitude", "lat", "lng", "lon", "geolocation", "coordinates", "gps"],
+    "device": ["ip_address", "ipaddr", "remote_addr", "mac_address", "hwaddr", "device_id", "device_name", "udid", "serial_number", "imei", "imsi", "iccid", "meid", "ssid", "wifi_name", "network_name"],
+    "biometric": ["fingerprint", "biometric", "face_data", "race", "ethnicity", "religion", "political_affiliation", "sexual_orientation", "gender", "sex", "genetic_data", "health_data"],
+    "browser": ["host_key", "encrypted_value", "user_agent"]
+  },
+  "sensitive_json_keys": {
+    "_comment": "JSON object keys treated as sensitive. Same categories as columns but includes dotted/nested key names.",
+    "identity": ["email", "username", "user_name", "login", "password", "passwd", "phone", "phone_number", "mobile", "cell", "fax", "first_name", "last_name", "full_name", "name", "display_name", "firstname", "lastname", "fullname", "nickname", "given_name", "family_name"],
+    "credentials": ["account", "account_name", "credential", "token", "auth", "secret", "api_key", "apikey", "cookie", "session", "access_token", "refresh_token", "id_token", "bearer", "oauth", "oauth_token", "client_secret", "private_key", "aws_access_key", "aws_secret_key"],
+    "financial": ["ssn", "social_security", "date_of_birth", "dob", "birthdate", "birthday", "card_number", "card_holder", "cardholder", "cvv", "expiry", "routing_number", "routing", "bank_account", "account_number", "swift", "bic", "swift_code", "bic_code", "sin", "tfn", "salary", "income", "wage"],
+    "government_id": ["passport", "passport_number", "drivers_license", "license_number", "national_id", "tax_id", "ein", "itin"],
+    "healthcare": ["patient_id", "mrn", "medical_record", "diagnosis", "prescription", "npi", "dea_number", "health_plan_id", "member_id"],
+    "device": ["ip_address", "mac_address", "device_id", "udid", "serial_number", "imei", "imsi", "iccid", "ssid"],
+    "location": ["latitude", "longitude", "lat", "lng", "geolocation", "coordinates"],
+    "biometric": ["fingerprint", "biometric", "face_data", "race", "ethnicity", "religion", "sexual_orientation"],
+    "platform": ["google.services.username", "profile.name"]
+  },
+  "pii_tables": {
+    "_comment": "Database tables that are entirely PII — all rows deleted, schema preserved.",
+    "chrome": ["autofill", "autofill_profiles", "autofill_profile_names", "autofill_profile_emails", "autofill_profile_phones", "autofill_profile_addresses", "autofill_profiles_trash", "local_addresses", "local_numbers", "local_names", "local_emails", "contact_info", "server_addresses", "server_card_metadata", "credit_cards", "local_ibans", "server_card_cloud_token_data", "masked_credit_cards", "password_notes", "insecure_credentials", "logins", "stats", "cookies", "omni_box_shortcuts", "top_sites", "keyword_search_terms", "content_annotations", "context_annotations", "downloads", "downloads_url_chains", "network_action_predictor"],
+    "firefox": ["moz_formhistory", "moz_cookies", "moz_inputhistory", "moz_perms", "moz_hosts", "moz_annos", "moz_places_metadata", "moz_places_metadata_search_queries", "moz_bookmarks_deleted", "moz_logins", "webappsstore2", "storage_sync_data", "storage_sync_mirror"],
+    "android": ["raw_contacts", "data", "calls", "sms", "threads", "pdu", "addr", "part", "canonical_addresses", "attendees", "phone_lookup", "name_lookup", "siminfo", "carriers"],
+    "messaging": ["chat_list", "chat_view", "message_thumbnails"],
+    "ios": ["access", "history_items", "history_visits", "history_tombstones", "cloud_tabs", "bookmark_tags", "zperson", "zdetectedface", "zdetectedfaceprint", "zcloudsharedalbuminvitationrecord", "zshare", "zmemory", "zsceneprint"],
+    "windows": ["notification"],
+    "generic": ["contacts", "messages", "call_log", "accounts", "search_history", "recent_searches", "purchase_history", "geolocation", "browsing_history", "form_history", "stats_table", "location_history"]
+  }
+}
