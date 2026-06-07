@@ -71,9 +71,38 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
     for fp_path in FALSE_POSITIVE_PATHS:
         if fp_path in path:
             return True
-    # GPS pattern: filter out version numbers and timestamps
-    if pattern_name == "gps_coord" and abs(float(match_text)) < 1.0:
-        return True
+    # GPS: valid lat/lon range is -90..90 / -180..180. Larger values are
+    # memory sizes, version numbers, or other non-GPS floats.
+    if pattern_name == "gps_coord":
+        try:
+            val = abs(float(match_text))
+            if val > 180.0 or val < 1.0:
+                return True
+        except ValueError:
+            pass
+    # SSN: CoreData internal columns (Z_PK, Z_ENT, Z_OPT, ROWID …) hold
+    # sequential integers that happen to match the 9-digit SSN pattern.
+    if pattern_name == "ssn":
+        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
+        if col_part.lower() in {"rowid", "z_pk", "z_ent", "z_opt", "z_cnt", "z_max", "z_min", "z_version"}:
+            return True
+    # IPv4: Apple's 17/8 public infrastructure block and RFC-1918 private
+    # ranges are not user-identifying IPs — suppress in verifier only.
+    if pattern_name == "ip_v4":
+        parts = match_text.split(".")
+        if len(parts) == 4:
+            try:
+                first, second = int(parts[0]), int(parts[1])
+                if first == 17:
+                    return True
+                if first == 10:
+                    return True
+                if first == 172 and 16 <= second <= 31:
+                    return True
+                if first == 192 and second == 168:
+                    return True
+            except ValueError:
+                pass
     # Skip already-redacted values
     if "[REDACTED" in match_text or "REDACTED_" in match_text:
         return True
