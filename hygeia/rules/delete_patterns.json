@@ -1,5 +1,5 @@
 {
-  "_comment": "HYGEIA deletion rules — paths and patterns for personal data removal",
+  "_comment": "HYGEIA deletion rules â€” paths and patterns for personal data removal",
   "directory_patterns": [
     "/mobile/Library/SMS/",
     "/mobile/Media/DCIM/",
@@ -50,7 +50,27 @@
     "CurrentPowerlog.PLSQL",
     "RMAdminStore-Local.sqlite",
     "cache_encryptedA.db",
-    "cache_encryptedB.db"
+    "cache_encryptedB.db",
+    "Web Data",
+    "Login Data",
+    "Shortcuts",
+    "Network Action Predictor",
+    "Affiliation Database",
+    "Extension Cookies",
+    "signons.sqlite",
+    "key4.db",
+    "cert9.db",
+    "content-prefs.sqlite",
+    "permissions.sqlite",
+    "contacts2.db",
+    "telephony.db",
+    "mmssms.db",
+    "calendar.db",
+    "accounts.db",
+    "WebCacheV01.dat",
+    "ActivitiesCache.db",
+    "Amcache.hve",
+    "knowledgeC.db"
   ],
   "plist_delete_files": [
     "com.apple.wifi.plist",
@@ -59,20 +79,56 @@
     "com.apple.wifi.sharing.plist"
   ],
   "extension_patterns": [
-    {"ext": ".jpg", "scope": "/var/mobile/"},
-    {"ext": ".jpeg", "scope": "/var/mobile/"},
-    {"ext": ".heic", "scope": "/var/mobile/"},
-    {"ext": ".heif", "scope": "/var/mobile/"},
-    {"ext": ".mov", "scope": "/var/mobile/"},
-    {"ext": ".mp4", "scope": "/var/mobile/"},
-    {"ext": ".m4v", "scope": "/var/mobile/"},
-    {"ext": ".aac", "scope": "/var/mobile/"},
-    {"ext": ".m4a", "scope": "/var/mobile/"},
-    {"ext": ".3gp", "scope": "/var/mobile/"}
+    {
+      "ext": ".jpg",
+      "scope": "/var/mobile/"
+    },
+    {
+      "ext": ".jpeg",
+      "scope": "/var/mobile/"
+    },
+    {
+      "ext": ".heic",
+      "scope": "/var/mobile/"
+    },
+    {
+      "ext": ".heif",
+      "scope": "/var/mobile/"
+    },
+    {
+      "ext": ".mov",
+      "scope": "/var/mobile/"
+    },
+    {
+      "ext": ".mp4",
+      "scope": "/var/mobile/"
+    },
+    {
+      "ext": ".m4v",
+      "scope": "/var/mobile/"
+    },
+    {
+      "ext": ".aac",
+      "scope": "/var/mobile/"
+    },
+    {
+      "ext": ".m4a",
+      "scope": "/var/mobile/"
+    },
+    {
+      "ext": ".3gp",
+      "scope": "/var/mobile/"
+    }
   ],
   "app_container_delete": {
     "_comment": "Delete all third-party app containers except jailbreak apps",
     "base_path": "/mobile/Containers/Data/Application/",
-    "preserve_apps": ["Dopamine", "Sileo", "NewTerm", "Filza", "weightBufs"]
+    "preserve_apps": [
+      "Dopamine",
+      "Sileo",
+      "NewTerm",
+      "Filza",
+      "weightBufs"
+    ]
   }
 }
