@@ -76,7 +76,6 @@ FORENSIC_FILES = {
     "TransportSecurity",
 }
 
-# File patterns (glob) for forensic artifacts
 FORENSIC_PATTERNS = [
     "*.ldb",
     "*.sst",
