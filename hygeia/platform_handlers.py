@@ -467,10 +467,7 @@ def _handle_notes_ios(db_path: Path) -> dict:
 
 
 def _handle_knowledgec(db_path: Path) -> dict:
-    """
-    Redact third-party app names, delete Siri/Safari/messaging streams.
-    Same logic as the existing sanitize_knowledgec — unified here.
-    """
+    """Redact third-party app names, delete Siri/Safari/messaging streams."""
     result = _build_result("knowledgec", db_path)
     try:
         conn = _open_and_prepare(db_path)

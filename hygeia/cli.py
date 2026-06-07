@@ -17,8 +17,7 @@ from pathlib import Path
 
 from .scanner import FileScanner, FileAction, ScanResult
 from .sqlite_sanitizer import (
-    delete_database, sanitize_knowledgec,
-    sanitize_photos_sqlite, delete_wal_orphans, find_all_databases,
+    delete_database, delete_wal_orphans, find_all_databases,
 )
 from .platform_handlers import sanitize_with_platform_detection
 from .plist_sanitizer import sanitize_plist
@@ -103,14 +102,6 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
             elif classification.action == FileAction.SELECTIVE_DB:
                 if dry_run:
                     actions.append({"action": "selective_db", "path": classification.path, "dry_run": True})
-                else:
-                    path_lower = classification.path.lower()
-                    if "knowledgec.db" in path_lower:
-                        actions.append(sanitize_knowledgec(full_path))
-                    elif "photos.sqlite" in path_lower:
-                        actions.append(sanitize_photos_sqlite(full_path))
-                    else:
-                        actions.append({"action": "selective_db", "path": classification.path, "note": "preserved"})
             elif classification.action == FileAction.PLIST_SANITIZE:
                 if dry_run:
                     actions.append({"action": "plist_sanitize", "path": classification.path, "dry_run": True})
