@@ -289,6 +289,198 @@ def test_normal_plist_non_sensitive_keys_untouched():
         assert sanitized["Language"] == "en-US"
 
 
+# ---------------------------------------------------------------------------
+# Regex PII scan — universal second pass
+# ---------------------------------------------------------------------------
+
+def test_regex_scan_email_in_arbitrary_key():
+    """An email address buried under a non-sensitive key gets regex-redacted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "cloud.quota.plist"
+        data = {
+            "CloudStorageCapacity": 5368709120,    # int — untouched
+            "CloudContactInfo": "drvged@gmail.com",  # non-sensitive key name, email value
+            "CloudEnabled": True,               # bool — untouched
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        assert any(t == "email" for _, t in result["regex_hits"]), (
+            f"Expected email hit in regex_hits, got: {result['regex_hits']}"
+        )
+        sanitized = _read_plist(plist_path)
+        assert "drvged@gmail.com" not in sanitized["CloudContactInfo"], (
+            f"Raw email should be gone, got: {sanitized['CloudContactInfo']!r}"
+        )
+        assert "[REDACTED_EMAIL]" in sanitized["CloudContactInfo"]
+        # Non-string values untouched
+        assert sanitized["CloudStorageCapacity"] == 5368709120
+        assert sanitized["CloudEnabled"] is True
+
+
+def test_regex_scan_phone_in_nested_dict():
+    """A phone number buried in a nested dict is found and redacted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "itunescloud.plist"
+        data = {
+            "StorefrontInfo": {
+                "Region": "US",
+                "ContactNumber": "+1 (555) 867-5309",
+            },
+            "Version": "4.2",
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hits_flat = [t for _, t in result["regex_hits"]]
+        assert "phone_us" in hits_flat, (
+            f"Expected phone_us hit, got: {result['regex_hits']}"
+        )
+        sanitized = _read_plist(plist_path)
+        assert "+1 (555) 867-5309" not in sanitized["StorefrontInfo"]["ContactNumber"]
+        assert sanitized["Version"] == "4.2"  # non-sensitive string, no PII → unchanged
+
+
+def test_regex_scan_binary_plist():
+    """A binary plist with PII in an arbitrary key gets regex-scanned."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "apsd.plist"
+        data = {
+            "ServerAddress": "192.168.1.100",   # IP address — should be redacted
+            "Port": 443,                          # int — untouched
+            "Enabled": True,                      # bool — untouched
+        }
+        # Write as binary plist
+        with open(plist_path, "wb") as f:
+            plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+
+        # Verify it really is binary
+        with open(plist_path, "rb") as f:
+            assert f.read(6) == b"bplist", "Test fixture must be a binary plist"
+
+        result = sanitize_plist(plist_path)
+
+        assert any(t == "ip_v4" for _, t in result["regex_hits"]), (
+            f"Expected ip_v4 regex hit, got: {result['regex_hits']}"
+        )
+        sanitized = _read_plist(plist_path)
+        assert "192.168.1.100" not in sanitized["ServerAddress"]
+        assert "[REDACTED_IP_V4]" in sanitized["ServerAddress"]
+        assert sanitized["Port"] == 443
+        assert sanitized["Enabled"] is True
+
+        # Verify output is still binary plist
+        with open(plist_path, "rb") as f:
+            assert f.read(6) == b"bplist", "Output should remain a binary plist"
+
+
+def test_regex_scan_mac_address():
+    """A MAC address in a plist value gets regex-redacted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "Accessibility.plist"
+        data = {
+            "NetworkInterface": "en0",
+            "HardwareAddress": "aa:bb:cc:dd:ee:ff",
+            "AutoConnect": True,
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        assert any(t == "mac_addr" for _, t in result["regex_hits"]), (
+            f"Expected mac_addr hit, got: {result['regex_hits']}"
+        )
+        sanitized = _read_plist(plist_path)
+        assert "aa:bb:cc:dd:ee:ff" not in sanitized["HardwareAddress"]
+        assert "[REDACTED_MAC_ADDR]" in sanitized["HardwareAddress"]
+        assert sanitized["NetworkInterface"] == "en0"  # no PII — untouched
+
+
+def test_regex_scan_imei():
+    """An IMEI in a plist value gets regex-redacted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "cmfsyncagent.plist"
+        data = {
+            "DeviceIMEI": "35-123456-123456-7",
+            "SyncEnabled": True,
+            "SyncCount": 12,
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        assert any(t == "imei" for _, t in result["regex_hits"]), (
+            f"Expected imei hit, got: {result['regex_hits']}"
+        )
+        sanitized = _read_plist(plist_path)
+        assert "35-123456-123456-7" not in sanitized["DeviceIMEI"]
+        assert sanitized["SyncCount"] == 12
+        assert sanitized["SyncEnabled"] is True
+
+
+def test_non_string_values_untouched():
+    """Integers, floats, booleans, bytes, and dates are not modified by regex scan."""
+    import datetime
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "test.plist"
+        now = datetime.datetime(2024, 1, 1, 12, 0, 0)
+        data = {
+            "IntVal": 42,
+            "FloatVal": 3.14,
+            "BoolTrue": True,
+            "BoolFalse": False,
+            "BytesVal": b"\xde\xad\xbe\xef",
+            "DateVal": now,
+            "SafeString": "hello world",  # no PII
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        # No regex hits and no key-based redactions expected
+        assert result["regex_hits"] == [], f"Unexpected regex hits: {result['regex_hits']}"
+        assert result["keys_redacted"] == [], f"Unexpected key redactions: {result['keys_redacted']}"
+
+        sanitized = _read_plist(plist_path)
+        assert sanitized["IntVal"] == 42
+        assert abs(sanitized["FloatVal"] - 3.14) < 1e-9
+        assert sanitized["BoolTrue"] is True
+        assert sanitized["BoolFalse"] is False
+        assert sanitized["BytesVal"] == b"\xde\xad\xbe\xef"
+        assert sanitized["SafeString"] == "hello world"
+
+
+def test_key_based_and_regex_scan_together():
+    """A plist with both a 'password' key AND an email in another value: both get redacted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "facetime.bag.plist"
+        data = {
+            "password": "supersecret",           # key-based hit (sensitive key)
+            "ContactBackup": "user@example.com", # non-sensitive key, regex hit
+            "Version": "2.0",                    # no PII
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        # Key-based redaction should catch 'password'
+        assert "password" in result["keys_redacted"], (
+            f"'password' should be in keys_redacted: {result['keys_redacted']}"
+        )
+        # Regex scan should catch the email in 'ContactBackup'
+        assert any(t == "email" for _, t in result["regex_hits"]), (
+            f"Expected email regex hit, got: {result['regex_hits']}"
+        )
+
+        sanitized = _read_plist(plist_path)
+        assert sanitized["password"] == "[REDACTED]"
+        assert "user@example.com" not in sanitized["ContactBackup"]
+        assert "[REDACTED_EMAIL]" in sanitized["ContactBackup"]
+        assert sanitized["Version"] == "2.0"
+
+
 if __name__ == "__main__":
     test_sensitive_key_detection()
     test_plist_sanitization()
@@ -301,4 +493,11 @@ if __name__ == "__main__":
     test_mobileactivationd_redact_all()
     test_normal_plist_not_redact_all()
     test_normal_plist_non_sensitive_keys_untouched()
+    test_regex_scan_email_in_arbitrary_key()
+    test_regex_scan_phone_in_nested_dict()
+    test_regex_scan_binary_plist()
+    test_regex_scan_mac_address()
+    test_regex_scan_imei()
+    test_non_string_values_untouched()
+    test_key_based_and_regex_scan_together()
     print("All tests passed.")
