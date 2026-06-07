@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hygeia"
-version = "2.0.0"
+version = "3.0.0"
 description = "Forensic-grade PII sanitization for any platform — databases, configs, logs, images"
 readme = "README.md"
 license = {text = "PolyForm-Noncommercial-1.0.0"}
