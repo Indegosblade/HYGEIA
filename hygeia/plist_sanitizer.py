@@ -8,6 +8,11 @@ preserving safe system identifiers.
 For high-risk device identity files (data_ark.plist, MobileGestalt, etc.)
 a "redact all values" mode is available that zeros every string and numeric
 value regardless of key name, preserving only the plist structure.
+
+After key-based sanitization, ALL plists undergo a universal PII regex scan
+(same patterns as text_sanitizer and sqlite_sanitizer) that catches PII
+buried in arbitrary keys — emails in cloud.quota.plist, phone numbers,
+MAC addresses, IMEI, IP addresses, etc.
 """
 
 import hashlib
@@ -15,6 +20,8 @@ import json
 import plistlib
 import logging
 from pathlib import Path
+
+from hygeia.text_sanitizer import PII_PATTERNS, _redact_pii_in_string
 
 log = logging.getLogger("hygeia.plist")
 
@@ -141,31 +148,97 @@ def _redact_recursive(obj, redacted_keys: list):
             _redact_recursive(item, redacted_keys)
 
 
+def _regex_scan_plist(obj, found_types: list, path: str = ""):
+    """
+    Recursively walk ALL string values in a plist structure and apply
+    PII_PATTERNS regex scanning.  Only string values are touched — booleans,
+    integers, floats, bytes, dates are left unchanged.
+
+    Values already replaced by pass 1 key-based sanitization (i.e. equal to
+    "[REDACTED]" or starting with "[REDACTED_") are skipped to avoid double-
+    processing and false BIC/NPI matches on the replacement token.
+
+    Mutates obj in place.  Appends (path, pii_type) tuples to found_types.
+    """
+    if isinstance(obj, dict):
+        for key in list(obj.keys()):
+            value = obj[key]
+            child_path = f"{path}.{key}" if path else key
+            if isinstance(value, str):
+                # Skip values already sanitized by pass 1
+                if value == "[REDACTED]" or value.startswith("[REDACTED_"):
+                    continue
+                redacted, types = _redact_pii_in_string(value)
+                if types:
+                    obj[key] = redacted
+                    for t in types:
+                        found_types.append((child_path, t))
+            elif isinstance(value, (dict, list)):
+                _regex_scan_plist(value, found_types, child_path)
+            # bool, int, float, bytes, datetime — leave untouched
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            child_path = f"{path}[{i}]"
+            if isinstance(item, str):
+                # Skip values already sanitized by pass 1
+                if item == "[REDACTED]" or item.startswith("[REDACTED_"):
+                    continue
+                redacted, types = _redact_pii_in_string(item)
+                if types:
+                    obj[i] = redacted
+                    for t in types:
+                        found_types.append((child_path, t))
+            elif isinstance(item, (dict, list)):
+                _regex_scan_plist(item, found_types, child_path)
+
+
+def _detect_plist_fmt(filepath: Path) -> object:
+    """Return plistlib.FMT_BINARY if the file starts with 'bplist', else FMT_XML."""
+    try:
+        with open(filepath, "rb") as f:
+            header = f.read(8)
+        if header.startswith(b"bplist"):
+            return plistlib.FMT_BINARY
+    except OSError:
+        pass
+    return plistlib.FMT_XML
+
+
 def sanitize_plist(filepath: Path) -> dict:
     """
-    Sanitize a binary plist file by redacting sensitive keys.
+    Sanitize a plist file (binary or XML) in two passes:
 
-    For files listed in redact_all_values_files (e.g. data_ark.plist,
-    com.apple.MobileGestalt.plist), ALL string/numeric values are replaced
-    regardless of key name.  For all other plists, only keys matching
-    SENSITIVE_KEY_PATTERNS are redacted.
+    Pass 1 — key-based:
+      * redact_all_values_files  → zero every string/numeric value
+      * all other plists          → redact values whose keys match SENSITIVE_KEY_PATTERNS
 
-    Returns action result dict.
+    Pass 2 — universal PII regex scan:
+      * Walk ALL string values in the entire plist structure
+      * Apply PII_PATTERNS (email, phone, MAC, IMEI, IP, …) to every string
+      * Replaces matches with [REDACTED_<TYPE>]
+      * Does NOT touch booleans, integers, floats, bytes, or dates
+
+    The file is written back in its original format (binary → binary, XML → XML).
+
+    Returns action result dict with keys_redacted and regex_hits fields.
     """
     result = {
         "action": "plist_sanitize",
         "path": str(filepath),
         "keys_redacted": [],
+        "regex_hits": [],
     }
 
     try:
         result["hash_before"] = _sha256(filepath)
+        fmt = _detect_plist_fmt(filepath)
         with open(filepath, "rb") as f:
             data = plistlib.load(f)
     except Exception as e:
         result["error"] = f"Failed to parse: {e}"
         return result
 
+    # Pass 1: key-based sanitization
     redacted: list = []
     if _is_redact_all_file(filepath.name):
         result["mode"] = "redact_all_values"
@@ -176,13 +249,20 @@ def sanitize_plist(filepath: Path) -> dict:
 
     result["keys_redacted"] = redacted
 
-    if redacted:
+    # Pass 2: universal PII regex scan on all string values
+    regex_hits: list = []
+    _regex_scan_plist(data, regex_hits)
+    result["regex_hits"] = regex_hits
+
+    changed = bool(redacted or regex_hits)
+    if changed:
         try:
             with open(filepath, "wb") as f:
-                plistlib.dump(data, f, fmt=plistlib.FMT_BINARY)
+                plistlib.dump(data, f, fmt=fmt)
             log.info(
                 f"Sanitized {filepath.name} ({result['mode']}): "
-                f"{len(redacted)} values redacted"
+                f"{len(redacted)} key-based redactions, "
+                f"{len(regex_hits)} regex PII hits"
             )
         except Exception as e:
             result["error"] = f"Failed to write: {e}"
