@@ -4,6 +4,8 @@ HYGEIA Verifier -- post-sanitization PII verification.
 Three independent checks: regex PII scan across text files,
 SQLite freelist inspection for recoverable records, and EXIF
 tag verification for residual image metadata.
+
+Patterns loaded from the central registry (rules/pii_patterns.json).
 """
 
 import re
@@ -14,145 +16,35 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import sqlite_sanitizer, exif_stripper
+from .patterns import load_patterns, PatternRegistry
 
 log = logging.getLogger("hygeia.verifier")
 
-PII_PATTERNS = {
-    # ── Original 13 patterns ──────────────────────────────────────────────────
-    "email": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
-    "phone_us": re.compile(r'\b(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'),
-    "phone_intl": re.compile(r'\+(?:44|49|33|91|81|61|86|55|7|34|39|82|31|46|47|48|90)\s?\d[\d\s\-]{6,14}\d\b'),
-    "ssn": re.compile(r'\b(?!000|666|9\d{2})[0-8]\d{2}[-\s]?\d{2}[-\s]?\d{4}\b'),
-    "credit_card": re.compile(r'\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'),
-    "ip_v4": re.compile(r'\b(?!(?:0|127|255)\.)\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'),
-    "ip_v6": re.compile(r'\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b'),
-    "apple_id": re.compile(r'\b\S+@(?:icloud|me|mac)\.com\b', re.IGNORECASE),
-    "gps_coord": re.compile(r'-?\d{2,3}\.\d{4,}'),
-    "imei": re.compile(r'\b\d{15}\b'),
-    "device_name": re.compile(r"\b\w+'s\s+(?:iPhone|iPad|iPod|Mac|Apple Watch)\b", re.IGNORECASE),
-    "iban": re.compile(r'\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b'),
-    "mac_addr": re.compile(r'\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'),
+_registry: PatternRegistry | None = None
 
-    # ── Identity documents ────────────────────────────────────────────────────
-    # UK National Insurance Number: two letters + 6 digits + A-D suffix
-    "uk_nin": re.compile(
-        r'\b[A-CEGHJ-PR-TW-Z]{2}\d{6}[A-D]\b', re.IGNORECASE
-    ),
-    # Indian PAN card: 5 letters, 4 digits, 1 letter (e.g. ABCDE1234F)
-    "indian_pan": re.compile(r'\b[A-Z]{5}\d{4}[A-Z]\b'),
-    # Indian Aadhaar: 4-4-4 digit groups (with space or hyphen)
-    "indian_aadhaar": re.compile(r'\b\d{4}[-\s]\d{4}[-\s]\d{4}\b'),
-    # DEA number: 2 letters + 7 digits (e.g. AB1234563)
-    "dea_number": re.compile(r'\b[A-Z]{2}\d{7}\b'),
-    # Medicare Beneficiary Identifier (MBI): 1digit-1UC-1UC/digit-1digit-1UC-1UC/digit-1digit-2UC-2digits
-    "medicare_mbi": re.compile(
-        r'\b\d[A-Z][A-Z0-9]\d[A-Z][A-Z0-9]\d[A-Z]{2}\d{2}\b'
-    ),
-    # Vehicle Identification Number: 17 chars, no I/O/Q
-    "vin": re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b'),
 
-    # ── Financial / banking ───────────────────────────────────────────────────
-    # US EIN (Employer Identification Number): XX-XXXXXXX
-    "us_ein": re.compile(r'\b\d{2}-\d{7}\b'),
-    # SWIFT / BIC code: 6 alpha + 2 alphanumeric + optional 3 alphanumeric
-    "swift_bic": re.compile(r'\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b'),
-    # Bitcoin address: Legacy P2PKH/P2SH (base58) or bech32
-    "bitcoin_address": re.compile(
-        r'\b(?:[13][a-km-zA-HJ-NP-Z1-9]{25,34}|bc1[a-zA-HJ-NP-Z0-9]{25,90})\b'
-    ),
-    # Ethereum address: 0x + 40 hex chars
-    "ethereum_address": re.compile(r'\b0x[0-9a-fA-F]{40}\b'),
+def _get_registry() -> PatternRegistry:
+    global _registry
+    if _registry is None:
+        _registry = load_patterns()
+    return _registry
 
-    # ── Credential / secret patterns ─────────────────────────────────────────
-    # JWT token: three base64url segments separated by dots
-    "jwt_token": re.compile(
-        r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
-    ),
-    # AWS access key ID: starts AKIA + 16 uppercase alphanumeric
-    "aws_access_key": re.compile(r'\bAKIA[0-9A-Z]{16}\b'),
-    # GitHub personal access tokens and OAuth tokens
-    "github_token": re.compile(
-        r'\b(?:ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{36,255}\b'
-    ),
-    # Generic Stripe-style API key: sk/pk + live/test/prod + 20+ chars
-    "generic_api_key": re.compile(
-        r'\b(?:sk|pk)[-_](?:live|test|prod)[-_][A-Za-z0-9]{20,}\b'
-    ),
-    # Slack tokens: xoxb/xoxp/xoxr/xoxa/xoxs prefix
-    "slack_token": re.compile(r'\bxox[bpras]-[0-9a-zA-Z-]{10,}\b'),
+
+def configure(only: list[str] | None = None, skip: list[str] | None = None):
+    """Reconfigure the verifier with specific pattern categories."""
+    global _registry
+    _registry = load_patterns(only=only, skip=skip)
+
+
+# Module-level dicts for backward compatibility (tests import these directly).
+# Populated eagerly from the registry on first import.
+PII_PATTERNS = _get_registry().regex_patterns
+CONTEXT_PATTERNS = {
+    name: (pat, kws, win)
+    for name, (pat, kws, win) in _get_registry().context_patterns.items()
 }
 
-# Context-dependent patterns: require nearby keyword(s) within a window of
-# characters. Each entry: (compiled_regex, set_of_keyword_strings, window_size)
-# Keywords are matched case-insensitively anywhere within `window` chars of
-# the regex match start/end.
-CONTEXT_PATTERNS: dict[str, tuple] = {
-    # US Passport: letter + 9 digits OR plain 9 digits, near "passport"
-    "us_passport": (
-        re.compile(r'\b[A-Z]?\d{9}\b'),
-        {"passport"},
-        120,
-    ),
-    # Driver's license: top-state formats, near "license", "dl", "driver"
-    # CA: 1 letter + 7 digits; NY/TX: 8-9 digits; FL: 1 letter + 12 digits
-    "drivers_license": (
-        re.compile(r'\b(?:[A-Z]\d{12}|[A-Z]\d{7}|\d{8,9})\b'),
-        {"license", "dl ", " dl", "driver"},
-        120,
-    ),
-    # Canadian SIN / Australian TFN share the same 3-3-3 format
-    "canadian_sin": (
-        re.compile(r'\b\d{3}[-\s]\d{3}[-\s]\d{3}\b'),
-        {"sin", "social insurance", "canadian"},
-        120,
-    ),
-    "australian_tfn": (
-        re.compile(r'\b\d{3}[-\s]\d{3}[-\s]\d{3}\b'),
-        {"tfn", "tax file", "australian"},
-        120,
-    ),
-    # US routing / ABA number: 9 digits, near "routing" or "aba"
-    "us_routing_number": (
-        re.compile(r'\b\d{9}\b'),
-        {"routing", "aba"},
-        120,
-    ),
-    # NPI (National Provider Identifier): 10 digits, near "npi" or "provider"
-    "npi": (
-        re.compile(r'\b\d{10}\b'),
-        {"npi", "provider"},
-        120,
-    ),
-    # Date of birth: labeled with DOB / date of birth / birthday keywords.
-    # Supports both MM/DD/YYYY (US) and ISO YYYY-MM-DD formats.
-    "date_of_birth": (
-        re.compile(
-            r'(?:DOB|Date\s+of\s+Birth|Birthday|birth_?date)\s*[:=]?\s*'
-            r'(?:\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2}|\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})',
-            re.IGNORECASE,
-        ),
-        # The keyword is embedded in the pattern itself; use an empty set so
-        # the context scan always triggers on a match (context window still
-        # checked against the inline keyword that the regex already enforces).
-        {"dob", "birth", "birthday"},
-        200,
-    ),
-    # Password in key=value / key: value format
-    "password_kv": (
-        re.compile(
-            r'\b(?:password|passwd|pwd)\s*[:=]\s*\S+',
-            re.IGNORECASE,
-        ),
-        {"password", "passwd", "pwd"},
-        200,
-    ),
-    # AWS secret access key: 40-char base64-ish, near "aws" or "secret"
-    "aws_secret_key": (
-        re.compile(r'\b[A-Za-z0-9/+=]{40}\b'),
-        {"aws", "secret"},
-        120,
-    ),
-}
+# Context patterns loaded from registry at scan time via _get_registry().context_patterns
 
 # File extensions that can contain readable text
 TEXT_SCANNABLE = {
@@ -400,7 +292,8 @@ def _scan_context_patterns(text: str, path: str, line_offset: int = 0) -> list[P
     source file (used when scanning line-by-line; pass 0 for whole-file scans).
     """
     matches = []
-    for name, (pattern, keywords, window) in CONTEXT_PATTERNS.items():
+    reg = _get_registry()
+    for name, (pattern, keywords, window) in reg.context_patterns.items():
         for m in pattern.finditer(text):
             # For patterns whose keywords are embedded in the regex itself
             # (date_of_birth, password_kv) every match is inherently in context.
@@ -445,15 +338,14 @@ def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024) -> l
             continue
 
         try:
+            reg = _get_registry()
             content = f.read_text(encoding="utf-8", errors="ignore")
             for line_num, line in enumerate(content.splitlines(), 1):
-                for name, pattern in PII_PATTERNS.items():
+                for name, pattern in reg.regex_patterns.items():
                     for m in pattern.finditer(line):
                         match_text = m.group()
                         if not _is_false_positive(rel_path, name, match_text):
                             matches.append(PIIMatch(rel_path, name, match_text, line_num))
-            # Context-dependent patterns: scan the full file content so
-            # keywords can be anywhere within the window around the match.
             matches.extend(_scan_context_patterns(content, rel_path))
             scanned += 1
         except (OSError, UnicodeDecodeError):
@@ -560,7 +452,7 @@ def scan_sqlite_content(dump_path: Path) -> list[PIIMatch]:
                                 continue
                             rel = str(db.relative_to(dump_path))
                             qualified_path = f"{rel}:{table}.{col_name}"
-                            for name, pattern in PII_PATTERNS.items():
+                            for name, pattern in _get_registry().regex_patterns.items():
                                 for m in pattern.finditer(value):
                                     if not _is_false_positive(qualified_path, name, m.group()):
                                         matches.append(PIIMatch(
