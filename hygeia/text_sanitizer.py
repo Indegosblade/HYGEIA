@@ -46,7 +46,7 @@ SHELL_HISTORY_FILES = {
     ".irb_history", ".lesshst", ".sqlite_history",
 }
 
-LOG_EXTENSIONS = {".log", ".txt", ".ips", ".crash"}
+LOG_EXTENSIONS = {".log", ".txt", ".ips", ".crash", ".xml"}
 
 
 def _is_sensitive_json_key(key: str) -> bool:

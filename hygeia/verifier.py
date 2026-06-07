@@ -180,6 +180,15 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         # All-same-digit cards are obviously synthetic
         if len(set(digits)) == 1:
             return True
+    # Vector/embedding database content columns store conversation text that
+    # naturally contains keyword-triggered patterns (password_kv, etc.)
+    if pattern_name == "password_kv":
+        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
+        embedding_cols = ("string_value", "c0", "c1", "c2", "metadata",
+                          "embedding_id", "document", "content")
+        if col_part.lower() in embedding_cols:
+            return True
+
     # Skip already-redacted values
     if "[REDACTED" in match_text or "REDACTED_" in match_text:
         return True
@@ -216,6 +225,15 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
 
     if pattern_name == "bitcoin_address":
         if len(match_text) < 26:
+            return True
+        # Hex-only strings (UUIDs, hashes, embedding IDs) are not bitcoin addresses.
+        # Real bitcoin addresses use base58 (mixed case, no 0OIl).
+        import re as _re
+        if _re.fullmatch(r'[0-9a-fA-F]+', match_text[1:]):
+            return True
+        # Database columns that store internal IDs, not crypto
+        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
+        if col_part.lower() in ("embedding_id", "id", "uuid", "guid", "hash", "checksum"):
             return True
 
     # Repeated/sequential digit strings in plists are binary padding, not real identifiers
