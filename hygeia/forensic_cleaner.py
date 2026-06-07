@@ -120,8 +120,9 @@ def clean_thumbnail_caches(dump_path, dry_run=False):
             if dry_run:
                 actions.append({"action": "delete_cache_file", "path": rel, "dry_run": True})
             else:
+                action = {"action": "delete_cache_file", "path": rel, "hash_before": _sha256(fp)}
                 fp.unlink(missing_ok=True)
-                actions.append({"action": "delete_cache_file", "path": rel})
+                actions.append(action)
                 log.info(f"Deleted cache file: {rel}")
     log.debug(f"Thumbnail/cache cleanup: {len(actions)} items found")
     return actions
@@ -160,8 +161,9 @@ def clean_swap_temp_files(dump_path, dry_run=False):
             if dry_run:
                 actions.append({"action": "delete_swap_file", "path": rel, "dry_run": True})
             else:
+                action = {"action": "delete_swap_file", "path": rel, "hash_before": _sha256(fp)}
                 fp.unlink(missing_ok=True)
-                actions.append({"action": "delete_swap_file", "path": rel})
+                actions.append(action)
                 log.info(f"Deleted swap/temp file: {rel}")
     log.debug(f"Swap/temp cleanup: {len(actions)} files found")
     return actions

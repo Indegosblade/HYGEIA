@@ -18,6 +18,7 @@ from pathlib import Path
 log = logging.getLogger("hygeia.text")
 
 
+
 def _sha256(filepath: Path) -> str:
     """Return the SHA256 hex digest of a file's contents."""
     h = hashlib.sha256()
