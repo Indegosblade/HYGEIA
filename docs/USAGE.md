@@ -8,7 +8,7 @@ Forensic-grade PII sanitization engine for filesystem dumps. Ships with iOS rule
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.10+
 - exiftool (optional, for image metadata stripping)
 
 ```bash
@@ -51,8 +51,12 @@ hygeia --input /path/to/dump --output /path/to/clean -v
 | `--input PATH` / `-i` | Source filesystem dump directory (required) |
 | `--output PATH` / `-o` | Destination for sanitized copy (required) |
 | `--dry-run` / `-n` | Preview all actions without making changes |
+| `--compliance MODE` | Compliance mode: `hipaa`, `gdpr`, `ccpa`, or `all` |
+| `--normalize-timestamps` | Set all file timestamps to epoch (anti-forensic) |
 | `--skip-verify` | Skip post-sanitization PII verification |
 | `--skip-exif` | Skip EXIF metadata stripping |
+| `--skip-forensic` | Skip anti-forensic hardening (LevelDB, caches, swap, indexes) |
+| `--optimize` | Remove localizations and caches to reduce output size |
 | `--manifest PATH` / `-m` | Write JSON audit manifest to custom path |
 | `--verbose` / `-v` | Detailed logging output |
 
