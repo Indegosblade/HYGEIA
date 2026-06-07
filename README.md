@@ -6,11 +6,11 @@
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey.svg)](https://github.com/Indegosblade/HYGEIA/actions/workflows/ci.yml)
 [![License: PolyForm](https://img.shields.io/badge/license-PolyForm%20NC-green.svg)](LICENSE)
 
-Forensic-grade PII sanitization for filesystem dumps, SQLite databases, configs, and images. HIPAA/GDPR/CCPA compliance modes included.
+Cross-platform forensic PII sanitization for filesystem dumps, SQLite databases, configs, and images. 20 schema-aware handlers tested in-house across Chrome, Firefox, iOS, Android, Windows, macOS, and Linux. HIPAA/GDPR/CCPA compliance modes included.
 
 HYGEIA is a data sanitization framework built for security researchers, forensic analysts, and compliance teams who need to strip personally identifiable information from filesystem dumps, application databases, configuration files, and media — without destroying the structural and system-level data that makes those artifacts useful.
 
-It handles iOS filesystem dumps with specialized rules, but the core engine is platform-agnostic: point it at Chrome profiles, Android extractions, Windows artifacts, macOS system data, or any directory containing SQLite databases, JSON configs, logs, or images, and it will find and remove PII using the same forensic-grade pipeline.
+Point it at a Chrome profile, an Android phone extraction, an iOS filesystem dump, a Windows forensic image, macOS system data, or any directory containing SQLite databases, JSON configs, logs, or images. HYGEIA auto-detects what it's looking at by table signature, applies platform-specific surgical sanitization where it has handlers, and falls back to full regex + column-name scanning for everything else. Every platform handler ships tested — not theoretical support, actual in-house validation against real-world databases.
 
 Built-in compliance modes for **HIPAA Safe Harbor**, **GDPR Article 4/9**, and **CCPA** with per-run coverage reporting.
 
@@ -160,25 +160,27 @@ Short digit sequences (9-10 digits) require nearby keywords to avoid false posit
 
 ## Platform Coverage
 
-### iOS (Full Pipeline)
+Every platform listed below ships with tested handlers — not theoretical coverage. Auto-detection is by table signature (schema inspection), not filename or directory path.
 
-Jailbreak-aware scanning with dynamic detection of Dopamine, palera1n, and RootHide. Preserves jailbreak infrastructure (`/var/jb/`, `/private/preboot/`, package databases) while removing user data. Column-level sanitization for knowledgeC.db (redacts third-party app names, preserves system app usage) and Photos.sqlite (NULLs GPS coordinates, deletes facial recognition data). SEGB biome stream deletion. Third-party app container cleanup with WAL handling.
-
-### Chrome / Chromium
+### Chrome / Chromium (4 handlers)
 
 History, Login Data, Web Data, Cookies, Shortcuts, Top Sites, Favicons, DIPS, Network Action Predictor, Extension Cookies, Affiliation Database, Media History. Auto-detected by table signature — Login Data is nuked differently than History. LevelDB localStorage and IndexedDB directory deletion. Session data cleanup.
 
-### Firefox
+### Firefox (3 handlers)
 
 places.sqlite, cookies.sqlite, formhistory.sqlite, permissions.sqlite, content-prefs.sqlite, key4.db, cert9.db, signons.sqlite, webappsstore.sqlite. Auto-detected by `moz_*` table presence. IndexedDB storage directory deletion. Session restore file deletion. Cache cleanup.
 
-### Android
+### iOS (8 handlers)
+
+Messages, Photos.sqlite, Health, Contacts, Safari History/Bookmarks, Notes, knowledgeC, Screen Time, TCC.db. Jailbreak-aware scanning with dynamic detection of Dopamine, palera1n, and RootHide. Preserves jailbreak infrastructure (`/var/jb/`, `/private/preboot/`, package databases) while removing user data. Column-level sanitization for knowledgeC.db (redacts third-party app names, preserves system app usage) and Photos.sqlite (NULLs GPS coordinates, deletes facial recognition data). SEGB biome stream deletion. Third-party app container cleanup with WAL handling.
+
+### Android (3 handlers)
 
 contacts2.db, mmssms.db, telephony.db, calendar.db, accounts.db, webview.db. Thumbnail cache deletion. Google Analytics database deletion.
 
-### Windows
+### Windows (1 handler + filesystem rules)
 
-Prefetch files (.pf), jump lists (.automaticDestinations-ms), LNK files, event logs (.evtx), recycle bin markers ($I/$R files), swap/hibernation files (pagefile.sys, swapfile.sys, hiberfil.sys), thumbnail caches (Thumbcache_*.db).
+WebCacheV01.dat (ESE-based). Prefetch files (.pf), jump lists (.automaticDestinations-ms), LNK files, event logs (.evtx), recycle bin markers ($I/$R files), swap/hibernation files (pagefile.sys, swapfile.sys, hiberfil.sys), thumbnail caches (Thumbcache_*.db).
 
 ### macOS
 
@@ -188,9 +190,9 @@ TCC.db permission grants, quarantine events database, Spotlight indexes (.Spotli
 
 Shell history files (.bash_history, .zsh_history, .python_history, etc.), GNOME Tracker databases, thumbnail caches, systemd journal artifacts.
 
-### Generic
+### Generic (fallback for any unrecognized database)
 
-Any directory containing SQLite databases: HYGEIA scans every TEXT column in every table for PII patterns, with no platform-specific knowledge required.
+Any directory containing SQLite databases: HYGEIA scans every TEXT column in every table for PII patterns, with no platform-specific knowledge required. This is the safety net — if your database isn't one of the 20 recognized types, it still gets sanitized.
 
 ---
 
@@ -331,7 +333,7 @@ hygeia/
 ├── scanner.py               File classification engine (DELETE/PRESERVE/SELECTIVE_DB/PLIST/EXIF)
 ├── patterns.py              Central pattern registry — loads pii_patterns.json, compiles regexes, filters by --only/--skip
 ├── sqlite_sanitizer.py      WAL-aware database sanitization — checkpoint → secure_delete → scan → VACUUM
-├── platform_handlers.py     20 schema-aware handlers (Chrome, Firefox, iOS, Android, Windows) with auto-detection
+├── platform_handlers.py     20 tested schema-aware handlers (Chrome, Firefox, iOS, Android, Windows, macOS) with table-signature auto-detection
 ├── text_sanitizer.py        JSON, log, CSV/TSV sanitization + shell history deletion
 ├── filesystem_sanitizer.py  Forensic artifact removal — LevelDB, caches, swap, indexes
 ├── forensic_cleaner.py      Anti-forensic hardening — slack space, ADS, extended attributes
