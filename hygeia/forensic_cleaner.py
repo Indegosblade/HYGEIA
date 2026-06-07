@@ -6,6 +6,7 @@ recovered by forensic tools: LevelDB stores, thumbnail/browser caches,
 swap/temp files, and file-system timestamps.
 """
 
+import hashlib
 import logging
 import os
 import shutil
@@ -13,6 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger("hygeia.forensic_cleaner")
+
+
+def _sha256(filepath: Path) -> str:
+    """Return the SHA256 hex digest of a file's contents."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # LevelDB
@@ -191,15 +201,56 @@ def normalize_timestamps(dump_path, epoch="2000-01-01"):
 # Master function
 
 
-def forensic_clean_all(dump_path, dry_run=False):
+def forensic_clean_all(dump_path, dry_run=False, workers=1):
+    """Run all forensic cleaning sub-tasks.
+
+    Args:
+        dump_path: Root directory to clean.
+        dry_run: Preview actions without executing.
+        workers: Number of parallel workers for independent sub-tasks.
+                 1 = sequential (default), 0 = auto-detect, >1 = explicit pool.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
     from pathlib import Path as _Path
+
     dump_path = _Path(dump_path)
-    actions = []
     prefix = "DRY RUN " if dry_run else ""
-    log.info(f"forensic_clean_all: {prefix}{dump_path}")
-    actions.extend(clean_leveldb_stores(dump_path, dry_run=dry_run))
-    actions.extend(clean_thumbnail_caches(dump_path, dry_run=dry_run))
-    actions.extend(clean_swap_temp_files(dump_path, dry_run=dry_run))
+    log.info(f"forensic_clean_all: {prefix}{dump_path} (workers={workers})")
+
+    # Resolve auto-detect
+    resolved_workers = workers if workers != 0 else (os.cpu_count() or 1)
+
+    # The three scan/delete sub-tasks are independent of each other
+    subtasks = [
+        ("leveldb", clean_leveldb_stores),
+        ("thumbnail_caches", clean_thumbnail_caches),
+        ("swap_temp", clean_swap_temp_files),
+    ]
+
+    # Results keyed by subtask name so we can assemble in deterministic order
+    subtask_results: dict[str, list] = {}
+
+    if resolved_workers > 1 and not dry_run:
+        futures_map = {}
+        with ThreadPoolExecutor(max_workers=min(resolved_workers, len(subtasks))) as executor:
+            for name, fn in subtasks:
+                future = executor.submit(fn, dump_path, dry_run)
+                futures_map[future] = name
+            completed = 0
+            for future in _as_completed(futures_map):
+                name = futures_map[future]
+                completed += 1
+                subtask_results[name] = future.result()
+                log.info(f"Forensic sub-task {completed}/{len(subtasks)} complete: {name}")
+    else:
+        for name, fn in subtasks:
+            subtask_results[name] = fn(dump_path, dry_run)
+
+    actions = []
+    for name, _ in subtasks:
+        actions.extend(subtask_results[name])
+
     if not dry_run:
         actions.extend(normalize_timestamps(dump_path))
+
     return actions
