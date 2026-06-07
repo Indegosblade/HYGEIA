@@ -11,6 +11,7 @@ import time
 import logging
 from pathlib import Path
 
+from .exceptions import DatabaseLockError, DatabaseCorruptionError
 from .utils import sha256 as _sha256
 
 log = logging.getLogger("hygeia.sqlite")
@@ -97,18 +98,21 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path):
                     pass
             return False
 
+    attempts = [
+        (0.1, _do_vacuum),
+        (0.3, _do_vacuum),
+        (0.9, _do_vacuum_journal_delete),
+    ]
     if not _do_vacuum(db_path):
-        # First retry: brief pause to let any OS-level lock clear.
-        time.sleep(0.1)
-        if not _do_vacuum(db_path):
-            # Second retry: switch to DELETE journal mode first (clears WAL
-            # lock held by Chrome and similar WAL-mode databases).
-            time.sleep(0.5)
-            if not _do_vacuum_journal_delete(db_path):
-                log.warning(
-                    f"VACUUM failed on {db_path} after all retries — "
-                    f"free pages may remain (expected for locked WAL databases)"
-                )
+        for delay, fn in attempts:
+            time.sleep(delay)
+            if fn(db_path):
+                break
+        else:
+            log.warning(
+                f"VACUUM failed on {db_path} after all retries — "
+                f"free pages may remain (expected for locked WAL databases)"
+            )
 
     # Delete WAL/SHM/journal files
     for suffix in WAL_SUFFIXES:
@@ -192,12 +196,23 @@ def sanitize_database(db_path: Path, sql_commands: list[str]) -> dict:
 
 
 def find_all_databases(dump_path: Path) -> list[Path]:
-    """Find all SQLite databases in a dump, including by magic bytes."""
+    """Find all SQLite databases in a dump, including by magic bytes.
+
+    Extension-first: files with known SQLite extensions are added directly.
+    Only files with unrecognized extensions get the 16-byte magic check.
+    """
     databases = []
+    unknown = []
     for f in dump_path.rglob("*"):
-        if f.is_file():
-            if f.suffix.lower() in SQLITE_EXTENSIONS or is_sqlite_database(f):
-                databases.append(f)
+        if not f.is_file():
+            continue
+        if f.suffix.lower() in SQLITE_EXTENSIONS:
+            databases.append(f)
+        else:
+            unknown.append(f)
+    for f in unknown:
+        if is_sqlite_database(f):
+            databases.append(f)
     return databases
 
 
@@ -211,10 +226,10 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
     Patterns loaded from rules/pii_patterns.json via the central registry.
     Pass `registry` to override (for --only/--skip filtering).
     """
-    from .patterns import load_patterns
+    from .patterns import get_default_registry
 
     if registry is None:
-        registry = load_patterns()
+        registry = get_default_registry()
 
     PII_PATTERNS = registry.regex_patterns
     SENSITIVE_COLUMNS = set(registry.sensitive_columns)
@@ -245,6 +260,21 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         return result
 
     result["hash_before"] = _sha256(db_path)
+
+    # Pre-sanitization integrity check
+    try:
+        pre_conn = sqlite3.connect(str(db_path))
+        integrity = pre_conn.execute("PRAGMA integrity_check").fetchone()
+        pre_conn.close()
+        if integrity[0] != "ok":
+            result["error"] = f"Database corruption detected pre-sanitization: {integrity[0]}"
+            result["integrity_pre"] = False
+            log.error(f"Integrity check FAILED for {db_path}: {integrity[0]}")
+            return result
+        result["integrity_pre"] = True
+    except sqlite3.Error as e:
+        result["error"] = f"Cannot open database for integrity check: {e}"
+        return result
 
     try:
         conn = sqlite3.connect(str(db_path))
@@ -396,6 +426,18 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
 
         result["pii_types_found"] = sorted(pii_found)
         vacuum_and_cleanup(conn, db_path)
+
+        # Post-sanitization integrity check
+        try:
+            post_conn = sqlite3.connect(str(db_path))
+            integrity = post_conn.execute("PRAGMA integrity_check").fetchone()
+            post_conn.close()
+            result["integrity_post"] = integrity[0] == "ok"
+            if not result["integrity_post"]:
+                log.error(f"Integrity check FAILED post-sanitization for {db_path}: {integrity[0]}")
+        except sqlite3.Error:
+            result["integrity_post"] = False
+
         result["hash_after"] = _sha256(db_path)
         log.info(f"Generic sanitized {db_path.name}: {result['tables_scanned']} tables, "
                  f"{result['rows_redacted']} rows redacted ({pass_count} passes), PII: {result['pii_types_found']}")

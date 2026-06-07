@@ -197,3 +197,15 @@ def list_available() -> dict[str, list[str]]:
         if not k.startswith("_")
     ]
     return result
+
+
+# Module-level singleton — compiled once, shared by all consumers.
+_default_registry: PatternRegistry | None = None
+
+
+def get_default_registry() -> PatternRegistry:
+    """Return the shared default registry (all patterns, compiled once)."""
+    global _default_registry
+    if _default_registry is None:
+        _default_registry = load_patterns()
+    return _default_registry
