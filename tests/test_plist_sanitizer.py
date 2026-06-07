@@ -481,6 +481,151 @@ def test_key_based_and_regex_scan_together():
         assert sanitized["Version"] == "2.0"
 
 
+
+
+# ---------------------------------------------------------------------------
+# Nested plist detection -- bytes values containing embedded XML/binary plists
+# ---------------------------------------------------------------------------
+
+def test_nested_xml_plist_bytes_email_redacted():
+    """bytes value containing an XML plist with an email -> email gets redacted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.facetime.bag.plist"
+
+        # Build the nested XML plist that lives inside the bytes value.
+        nested = {
+            "AccountInfo": "user@icloud.com",
+            "ServerIP": "17.32.0.1",
+        }
+        nested_bytes = plistlib.dumps(nested, fmt=plistlib.FMT_XML)
+        assert nested_bytes.startswith(b"<?xml"), "fixture must be XML plist bytes"
+
+        data = {
+            "CachedBag": nested_bytes,
+            "Version": "1.0",
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hit_types = [t for _, t in result["regex_hits"]]
+        assert "email" in hit_types, (
+            f"Expected email hit from nested plist bytes, got: {result['regex_hits']}"
+        )
+
+        sanitized = _read_plist(plist_path)
+        cached = sanitized["CachedBag"]
+        assert isinstance(cached, bytes), "CachedBag should still be bytes after sanitization"
+        inner = plistlib.loads(cached)
+        assert "user@icloud.com" not in inner["AccountInfo"], (
+            f"Raw email still present: {inner['AccountInfo']!r}"
+        )
+        assert "[REDACTED_EMAIL]" in inner["AccountInfo"]
+        # Non-nested string unchanged
+        assert sanitized["Version"] == "1.0"
+
+
+def test_nested_binary_plist_bytes_phone_redacted():
+    """bytes value containing a binary plist with a phone number -> phone gets redacted."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "contactscache.plist"
+
+        nested = {
+            "PhoneNumber": "+1 (555) 867-5309",
+            "Label": "mobile",
+        }
+        nested_bytes = plistlib.dumps(nested, fmt=plistlib.FMT_BINARY)
+        assert nested_bytes.startswith(b"bplist"), "fixture must be binary plist bytes"
+
+        data = {
+            "CachedContact": nested_bytes,
+            "SyncToken": "abc123",
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hit_types = [t for _, t in result["regex_hits"]]
+        assert "phone_us" in hit_types, (
+            f"Expected phone_us hit from nested binary plist bytes, got: {result['regex_hits']}"
+        )
+
+        sanitized = _read_plist(plist_path)
+        cached = sanitized["CachedContact"]
+        assert isinstance(cached, bytes)
+        inner = plistlib.loads(cached)
+        assert "+1 (555) 867-5309" not in inner["PhoneNumber"], (
+            f"Raw phone still present: {inner['PhoneNumber']!r}"
+        )
+        # Output should remain a binary plist
+        assert cached.startswith(b"bplist"), "nested plist should remain binary format"
+
+
+def test_bytes_with_certificate_left_untouched():
+    """bytes value containing random/certificate binary data -> left untouched."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "keychain.plist"
+
+        # Simulate a DER certificate blob -- starts with 0x30 (ASN.1 SEQUENCE)
+        cert_blob = b"\x30\x82\x04\x00" + b"\xde\xad\xbe\xef" * 256
+
+        data = {
+            "CertificateData": cert_blob,
+            "Label": "My Cert",
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        assert result["regex_hits"] == [], (
+            f"No regex hits expected for cert blob, got: {result['regex_hits']}"
+        )
+        sanitized = _read_plist(plist_path)
+        assert sanitized["CertificateData"] == cert_blob, (
+            "Certificate bytes should be left completely untouched"
+        )
+
+
+def test_nested_plist_bytes_multiple_pii_types():
+    """Nested plist bytes containing multiple PII types -- all caught.
+
+    Uses key name 'CachedBag' (non-sensitive) to mirror the real-world
+    com.apple.facetime.bag.plist structure that triggered this fix.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.facetime.bag.plist"
+
+        nested = {
+            "ContactEmail": "victim@example.com",
+            "ContactPhone": "+1 (800) 555-1234",
+            "ServerIP": "203.0.113.42",
+            "DeviceMAC": "de:ad:be:ef:00:01",
+        }
+        nested_bytes = plistlib.dumps(nested, fmt=plistlib.FMT_XML)
+
+        data = {
+            "CachedBag": nested_bytes,
+            "Enabled": True,
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hit_types = {t for _, t in result["regex_hits"]}
+        assert "email" in hit_types, f"Missing email hit: {result['regex_hits']}"
+        assert "phone_us" in hit_types, f"Missing phone_us hit: {result['regex_hits']}"
+        assert "ip_v4" in hit_types, f"Missing ip_v4 hit: {result['regex_hits']}"
+        assert "mac_addr" in hit_types, f"Missing mac_addr hit: {result['regex_hits']}"
+
+        sanitized = _read_plist(plist_path)
+        inner = plistlib.loads(sanitized["CachedBag"])
+        assert "victim@example.com" not in inner["ContactEmail"]
+        assert "+1 (800) 555-1234" not in inner["ContactPhone"]
+        assert "203.0.113.42" not in inner["ServerIP"]
+        assert "de:ad:be:ef:00:01" not in inner["DeviceMAC"]
+        # Non-PII structure preserved
+        assert sanitized["Enabled"] is True
+
 if __name__ == "__main__":
     test_sensitive_key_detection()
     test_plist_sanitization()
@@ -500,4 +645,8 @@ if __name__ == "__main__":
     test_regex_scan_imei()
     test_non_string_values_untouched()
     test_key_based_and_regex_scan_together()
+    test_nested_xml_plist_bytes_email_redacted()
+    test_nested_binary_plist_bytes_phone_redacted()
+    test_bytes_with_certificate_left_untouched()
+    test_nested_plist_bytes_multiple_pii_types()
     print("All tests passed.")
