@@ -6,7 +6,6 @@ Patterns loaded from the central registry (rules/pii_patterns.json).
 """
 
 import csv
-import hashlib
 import io
 import json
 import logging
@@ -15,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .patterns import load_patterns, PatternRegistry
+from .utils import sha256 as _sha256
 
 log = logging.getLogger("hygeia.text")
 
@@ -32,14 +32,6 @@ def configure(only: list[str] | None = None, skip: list[str] | None = None):
     """Reconfigure the text sanitizer with specific pattern categories."""
     global _registry
     _registry = load_patterns(only=only, skip=skip)
-
-
-def _sha256(filepath: Path) -> str:
-    h = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 SAFE_JSON_KEYS = {
     "version", "build", "type", "id", "key", "format",

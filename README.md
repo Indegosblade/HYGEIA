@@ -5,7 +5,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: PolyForm](https://img.shields.io/badge/license-PolyForm%20NC-green.svg)](LICENSE)
 
-**Forensic-grade PII sanitization. Any platform. Any database. Compliance-ready.**
+Forensic-grade PII sanitization for filesystem dumps, SQLite databases, configs, and images. HIPAA/GDPR/CCPA compliance modes included.
 
 HYGEIA is a data sanitization framework built for security researchers, forensic analysts, and compliance teams who need to strip personally identifiable information from filesystem dumps, application databases, configuration files, and media — without destroying the structural and system-level data that makes those artifacts useful.
 
