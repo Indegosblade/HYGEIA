@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 authors = [
     {name = "Kevin Estrada", email = "estradakh@gmail.com"},
 ]
-keywords = ["pii", "sanitization", "forensic", "forensics", "privacy", "hipaa", "gdpr", "ccpa", "security"]
+keywords = ["sanitization", "forensics", "security", "privacy", "pii", "hipaa", "gdpr", "ccpa"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
