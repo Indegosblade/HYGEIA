@@ -406,7 +406,7 @@
     "government_id": ["passport", "passport_number", "drivers_license", "license_number", "national_id", "insurance_number", "policy_number"],
     "healthcare": ["patient_id", "mrn", "medical_record", "npi", "dea_number", "diagnosis", "diagnosis_code", "prescription", "medication", "date_of_birth", "dob", "birthdate", "birthday", "health_plan_id", "member_id", "subscriber_id"],
     "location": ["latitude", "longitude", "lat", "lng", "lon", "geolocation", "coordinates", "gps"],
-    "device": ["ip_address", "ipaddr", "remote_addr", "mac_address", "hwaddr", "device_id", "device_name", "udid", "serial_number", "imei", "imsi", "iccid", "meid", "ssid", "wifi_name", "network_name"],
+    "device": ["ip_address", "ipaddr", "remote_addr", "mac_address", "hwaddr", "device_id", "device_name", "device_udid", "udid", "serial_number", "imei", "imsi", "iccid", "meid", "ssid", "wifi_name", "network_name"],
     "biometric": ["fingerprint", "biometric", "face_data", "race", "ethnicity", "religion", "political_affiliation", "sexual_orientation", "gender", "sex", "genetic_data", "health_data"],
     "browser": ["host_key", "encrypted_value", "user_agent"]
   },
@@ -417,7 +417,7 @@
     "financial": ["ssn", "social_security", "date_of_birth", "dob", "birthdate", "birthday", "card_number", "card_holder", "cardholder", "cvv", "expiry", "routing_number", "routing", "bank_account", "account_number", "swift", "bic", "swift_code", "bic_code", "sin", "tfn", "salary", "income", "wage"],
     "government_id": ["passport", "passport_number", "drivers_license", "license_number", "national_id", "tax_id", "ein", "itin"],
     "healthcare": ["patient_id", "mrn", "medical_record", "diagnosis", "prescription", "npi", "dea_number", "health_plan_id", "member_id"],
-    "device": ["ip_address", "mac_address", "device_id", "udid", "serial_number", "imei", "imsi", "iccid", "ssid"],
+    "device": ["ip_address", "mac_address", "device_id", "device_udid", "udid", "serial_number", "imei", "imsi", "iccid", "ssid"],
     "location": ["latitude", "longitude", "lat", "lng", "geolocation", "coordinates"],
     "biometric": ["fingerprint", "biometric", "face_data", "race", "ethnicity", "religion", "sexual_orientation"],
     "platform": ["google.services.username", "profile.name"]
