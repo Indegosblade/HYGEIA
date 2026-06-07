@@ -6,13 +6,26 @@
 [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey.svg)](https://github.com/Indegosblade/HYGEIA/actions/workflows/ci.yml)
 [![License: PolyForm](https://img.shields.io/badge/license-PolyForm%20NC-green.svg)](LICENSE)
 
-Cross-platform forensic PII sanitization for filesystem dumps, SQLite databases, configs, and images. 20 schema-aware handlers tested in-house across Chrome, Firefox, iOS, Android, Windows, macOS, and Linux. HIPAA/GDPR/CCPA compliance modes included.
+Forensic-grade PII sanitization that actually understands what it's looking at.
 
-HYGEIA is a data sanitization framework built for security researchers, forensic analysts, and compliance teams who need to strip personally identifiable information from filesystem dumps, application databases, configuration files, and media — without destroying the structural and system-level data that makes those artifacts useful.
+20 schema-aware handlers detect and surgically clean Chrome profiles, Firefox databases, iOS filesystem dumps, Android extractions, and Windows forensic artifacts — by table signature, not filename guessing. Everything else gets full regex + column-name scanning as a safety net. Zero external pip dependencies.
 
-Point it at a Chrome profile, an Android phone extraction, an iOS filesystem dump, a Windows forensic image, macOS system data, or any directory containing SQLite databases, JSON configs, logs, or images. HYGEIA auto-detects what it's looking at by table signature, applies platform-specific surgical sanitization where it has handlers, and falls back to full regex + column-name scanning for everything else. Every platform handler ships tested — not theoretical support, actual in-house validation against real-world databases.
+**Platforms tested in-house:** Chrome/Chromium (4 handlers) · Firefox (3) · iOS (8) · Android (3) · Windows (1 + filesystem rules) · macOS · Linux
 
-Built-in compliance modes for **HIPAA Safe Harbor**, **GDPR Article 4/9**, and **CCPA** with per-run coverage reporting.
+**Compliance:** HIPAA Safe Harbor · GDPR Article 4/9 · CCPA — with per-run coverage reporting.
+
+---
+
+## Why HYGEIA?
+
+Existing tools either don't do this or solve a different problem:
+
+- **Cellebrite UFED / Magnet AXIOM / EnCase** — $15K–$50K/seat forensic *acquisition* tools. They extract and present PII. They don't remove it. If you need to share a dump without leaking personal data, they have no answer.
+- **Autopsy** — Free forensic analysis. Same problem: it finds PII, it doesn't sanitize it. There's no "redact and export clean" workflow.
+- **Manual SQLite editing** — Misses WAL files (which contain 50–95% of "deleted" records), misses freelist pages, misses FTS shadow tables, misses LevelDB, misses thumbnail caches. One missed artifact and the data is recoverable.
+- **Generic regex scrubbers** — Don't understand database schemas. Can't distinguish a Chrome Login Data table from a Firefox permissions table. Can't do WAL checkpointing or VACUUM. Can't handle platform-specific column semantics.
+
+HYGEIA exists because no tool combines platform-aware surgical sanitization with anti-forensic hardening in a single pass. It's built for security researchers sharing device dumps, forensic analysts preparing court exhibits, red teams sanitizing test data, and compliance teams processing DSAR requests — anyone who needs the structural data without the personal data.
 
 ---
 
@@ -257,36 +270,36 @@ from pathlib import Path
 from hygeia.sqlite_sanitizer import sanitize_database_generic
 result = sanitize_database_generic(Path("any_database.db"))
 print(f"Redacted {result['rows_redacted']} rows, found: {result['pii_types_found']}")
+# => Redacted 847 rows, found: ['email', 'phone', 'sensitive_column:username']
 
 # Platform-aware database sanitization (auto-detects Chrome, Firefox, iOS, etc.)
 from hygeia.platform_handlers import sanitize_with_platform_detection
 result = sanitize_with_platform_detection(Path("Login Data"))
 print(f"Platform: {result.get('platform', 'generic')}, deleted: {result['rows_deleted']}")
+# => Platform: chrome_login_data, deleted: 34
 
 # Text file sanitization
 from hygeia.text_sanitizer import sanitize_json, sanitize_log_file, sanitize_csv
-sanitize_json(Path("config.json"))
-sanitize_log_file(Path("app.log"))
+result = sanitize_json(Path("config.json"))
+# => {'action': 'sanitize_json', 'fields_redacted': 3, 'path': 'config.json'}
 
 # Pattern registry — configure which patterns are active
 from hygeia.patterns import load_patterns, list_available
 registry = load_patterns(only=["identity", "financial"])  # category filter
 registry = load_patterns(skip=["crypto"])                 # exclude a category
-print(list_available())                                   # all categories + pattern names
-
-# Selective text sanitization
-from hygeia import text_sanitizer
-text_sanitizer.configure(only=["vin", "credit_card"])     # only these two patterns
-sanitize_log_file(Path("fleet_records.log"))
+print(list_available())
+# => {'identity': ['ssn', 'uk_nin', 'pan_card', ...], 'financial': ['credit_card', 'iban', ...], ...}
 
 # Forensic artifact cleanup
 from hygeia.filesystem_sanitizer import sanitize_filesystem
 actions = sanitize_filesystem(Path("/path/to/dump"), normalize_timestamps=True)
+# => [{'action': 'delete', 'path': 'LocalStorage/leveldb/', 'reason': 'leveldb_store'}, ...]
 
 # Post-sanitization verification
 from hygeia.verifier import verify_sanitization
 result = verify_sanitization(Path("/path/to/clean"))
 assert result.passed, f"{result.total_findings} PII findings remain"
+# => VerificationResult(passed=True, total_findings=0, files_scanned=26)
 
 # Compliance-driven sanitization
 from hygeia.compliance import get_compliance_profile
@@ -294,6 +307,7 @@ profile = get_compliance_profile("hipaa")
 sanitize_database_generic(Path("patient.db"),
     extra_columns=profile.extra_sensitive_columns,
     extra_tables=profile.extra_pii_tables)
+# => {'rows_redacted': 2341, 'pii_types_found': ['sensitive_column:mrn', 'npi', 'email']}
 ```
 
 ---
@@ -353,6 +367,25 @@ hygeia/
 ```
 
 Zero external pip dependencies. Stdlib only. Optional system exiftool for image metadata.
+
+---
+
+## Limitations
+
+Documenting what HYGEIA doesn't do is as important as what it does:
+
+| Limitation | Detail |
+|-----------|--------|
+| **Encrypted databases** | HYGEIA cannot read or sanitize encrypted SQLite databases (e.g. Signal's sqlcipher, FileVault-encrypted volumes). If a database requires a key to open, it's skipped with a warning. |
+| **Non-SQLite databases** | ESE databases (Windows WebCache, SRUM) are identified and flagged but not parsed internally. LevelDB stores are deleted entirely rather than selectively sanitized. |
+| **Binary application data** | Proprietary binary formats (e.g. Chrome's SNSS session files, Firefox sessionstore.jsonlz4 internals) are deleted rather than surgically edited. |
+| **Network captures** | PCAP/PCAPNG files are not parsed. If your dump contains packet captures, remove them separately. |
+| **Disk-level artifacts** | HYGEIA operates at the filesystem level. It cannot wipe unallocated disk sectors, MFT entries, or journal data below the filesystem. For that, use a disk-level tool after HYGEIA cleans the logical files. |
+| **Steganography** | Embedded data within image pixel values is not detected or removed. EXIF/XMP metadata is stripped; pixel content is untouched. |
+| **Memory dumps** | Raw RAM dumps (.raw, .vmem, hibernation files) are deleted but not parsed for PII extraction. |
+| **Language detection** | PII patterns are primarily English/Latin-script. CJK names, Arabic identifiers, and non-Latin personal data may not match regex patterns. Column-name and table-name detection still catches these in structured databases. |
+
+HYGEIA reports what it skipped. Check the audit manifest (`deletion_manifest.json`) for any files that were classified but not processed — these may need manual review.
 
 ---
 
