@@ -1,6 +1,7 @@
 """Tests for text file sanitization — JSON, logs, CSV, shell history."""
 
 import json
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -29,7 +30,7 @@ def test_json_sensitive_key_redaction():
     assert data["password"] == "[REDACTED]"
     assert data["api_key"] == "[REDACTED]"
     assert data["version"] == "1.0"
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_json_nested_sensitive_keys():
@@ -41,12 +42,12 @@ def test_json_nested_sensitive_keys():
             "settings": {"theme": "dark"},
         }
     }))
-    result = sanitize_json(f)
+    sanitize_json(f)
     data = json.loads(f.read_text())
     assert data["app"]["auth"]["token"] == "[REDACTED]"
     assert data["app"]["auth"]["refresh_token"] == "[REDACTED]"
     assert data["app"]["settings"]["theme"] == "dark"
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_json_pii_in_values():
@@ -56,11 +57,11 @@ def test_json_pii_in_values():
         "message": "Contact user@example.com for details",
         "note": "Call (555) 123-4567",
     }))
-    result = sanitize_json(f)
+    sanitize_json(f)
     data = json.loads(f.read_text())
     assert "user@example.com" not in data["message"]
     assert "REDACTED" in data["message"]
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_log_file_email_redaction():
@@ -75,7 +76,7 @@ def test_log_file_email_redaction():
     assert "admin@company.com" not in content
     assert "user@test.org" not in content
     assert "System startup complete" in content
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_log_file_phone_redaction():
@@ -86,7 +87,7 @@ def test_log_file_phone_redaction():
     assert result["lines_redacted"] >= 1
     content = f.read_text()
     assert "555-123-4567" not in content or "REDACTED" in content
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_csv_header_based_redaction():
@@ -100,7 +101,7 @@ def test_csv_header_based_redaction():
     content = f.read_text()
     assert "alice@test.com" not in content
     assert "bob@test.com" not in content
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_csv_pii_in_non_header_cells():
@@ -109,19 +110,19 @@ def test_csv_pii_in_non_header_cells():
     f.write_text("id,notes\n"
                  "1,Contact user@hidden.com for help\n"
                  "2,Nothing special here\n")
-    result = sanitize_csv(f)
+    sanitize_csv(f)
     content = f.read_text()
     assert "user@hidden.com" not in content
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_shell_history_deletion():
     d = tempfile.mkdtemp()
     hist = Path(d) / ".bash_history"
     hist.write_text("ssh root@192.168.1.1\nmysql -u admin -p secret\n")
-    result = delete_shell_history(hist)
+    delete_shell_history(hist)
     assert not hist.exists(), ".bash_history should be deleted"
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_sanitize_all_text_files():
@@ -133,7 +134,7 @@ def test_sanitize_all_text_files():
     actions = sanitize_all_text_files(root)
     assert len(actions) >= 3
     assert not (root / ".zsh_history").exists()
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 if __name__ == "__main__":

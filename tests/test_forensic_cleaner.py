@@ -2,14 +2,10 @@
 Tests for hygeia.forensic_cleaner -- anti-forensic hardening module.
 """
 
-import os
 import shutil
 import tempfile
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-
-import pytest
 
 from hygeia.forensic_cleaner import (
     clean_leveldb_stores,
@@ -87,7 +83,7 @@ class TestCleanLeveldbStores:
             store = _mkdir(d, "db")
             _touch(store / "CURRENT", b"1")
             _touch(store / "MANIFEST-000001", b"data")
-            actions = clean_leveldb_stores(d)
+            clean_leveldb_stores(d)
             assert not store.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -99,7 +95,7 @@ class TestCleanLeveldbStores:
             store = _mkdir(d, "db")
             _touch(store / "CURRENT", b"1")
             _touch(store / "000001.log", b"data")
-            actions = clean_leveldb_stores(d)
+            clean_leveldb_stores(d)
             assert not store.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -303,7 +299,7 @@ class TestCleanThumbnailCaches:
         try:
             gpu = _mkdir(d, "GPUCache")
             _touch(gpu / "data", b"x")
-            actions = clean_thumbnail_caches(d)
+            clean_thumbnail_caches(d)
             assert not gpu.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -314,7 +310,7 @@ class TestCleanThumbnailCaches:
         try:
             t = _mkdir(d, "Thumbnails")
             _touch(t / "img.jpg", b"x")
-            actions = clean_thumbnail_caches(d)
+            clean_thumbnail_caches(d)
             assert not t.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -325,7 +321,7 @@ class TestCleanThumbnailCaches:
         try:
             cc = _mkdir(d, "Code Cache")
             _touch(cc / "js", b"x")
-            actions = clean_thumbnail_caches(d)
+            clean_thumbnail_caches(d)
             assert not cc.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -336,7 +332,7 @@ class TestCleanThumbnailCaches:
         try:
             mixed = _mkdir(d, "MyAppCacheData")
             _touch(mixed / "f", b"x")
-            actions = clean_thumbnail_caches(d)
+            clean_thumbnail_caches(d)
             assert not mixed.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -347,7 +343,7 @@ class TestCleanThumbnailCaches:
         try:
             pb = _mkdir(d, "com.apple.UIKit.pboardPersistentItems")
             _touch(pb / "item", b"x")
-            actions = clean_thumbnail_caches(d)
+            clean_thumbnail_caches(d)
             assert not pb.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -368,7 +364,7 @@ class TestCleanThumbnailCaches:
         d = _make_tmp()
         try:
             f = _touch(d / "thumbnails.db-wal", b"data")
-            actions = clean_thumbnail_caches(d)
+            clean_thumbnail_caches(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -378,7 +374,7 @@ class TestCleanThumbnailCaches:
         d = _make_tmp()
         try:
             f = _touch(d / "thumbnails-journal", b"data")
-            actions = clean_thumbnail_caches(d)
+            clean_thumbnail_caches(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -430,7 +426,7 @@ class TestCleanSwapTempFiles:
         d = _make_tmp()
         try:
             f = _touch(d / "swapfile.sys", b"data")
-            actions = clean_swap_temp_files(d)
+            clean_swap_temp_files(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -439,7 +435,7 @@ class TestCleanSwapTempFiles:
         d = _make_tmp()
         try:
             f = _touch(d / "hiberfil.sys", b"data")
-            actions = clean_swap_temp_files(d)
+            clean_swap_temp_files(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -449,7 +445,7 @@ class TestCleanSwapTempFiles:
         d = _make_tmp()
         try:
             f = _touch(d / ".exploit.py.swp", b"vim")
-            actions = clean_swap_temp_files(d)
+            clean_swap_temp_files(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -458,7 +454,7 @@ class TestCleanSwapTempFiles:
         d = _make_tmp()
         try:
             f = _touch(d / "notes.swo", b"vim")
-            actions = clean_swap_temp_files(d)
+            clean_swap_temp_files(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -467,7 +463,7 @@ class TestCleanSwapTempFiles:
         d = _make_tmp()
         try:
             f = _touch(d / "upload.tmp", b"x")
-            actions = clean_swap_temp_files(d)
+            clean_swap_temp_files(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -477,7 +473,7 @@ class TestCleanSwapTempFiles:
         d = _make_tmp()
         try:
             f = _touch(d / "~$report.docx", b"lock")
-            actions = clean_swap_temp_files(d)
+            clean_swap_temp_files(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -487,7 +483,7 @@ class TestCleanSwapTempFiles:
         d = _make_tmp()
         try:
             f = _touch(d / ".~lock.spreadsheet.ods#", b"lock")
-            actions = clean_swap_temp_files(d)
+            clean_swap_temp_files(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
@@ -497,7 +493,7 @@ class TestCleanSwapTempFiles:
         d = _make_tmp()
         try:
             f = _touch(d / "PAGEFILE.SYS", b"data")
-            actions = clean_swap_temp_files(d)
+            clean_swap_temp_files(d)
             assert not f.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)

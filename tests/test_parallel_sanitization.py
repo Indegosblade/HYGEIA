@@ -12,7 +12,6 @@ Covers:
 import json
 import logging
 import os
-import shutil
 import sqlite3
 import sys
 import tempfile
@@ -179,10 +178,10 @@ def test_db_parallel_same_as_sequential():
 
         scan = ScanResult()
 
-        seq_actions = sanitize_databases(seq_root, scan, compliance=None,
-                                          dry_run=False, workers=1)
-        par_actions = sanitize_databases(par_root, scan, compliance=None,
-                                          dry_run=False, workers=2)
+        sanitize_databases(seq_root, scan, compliance=None,
+                           dry_run=False, workers=1)
+        sanitize_databases(par_root, scan, compliance=None,
+                           dry_run=False, workers=2)
 
         # Both DBs should have been sanitized
         def _read_contacts(db_path: Path):

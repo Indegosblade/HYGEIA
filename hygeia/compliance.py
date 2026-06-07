@@ -6,10 +6,8 @@ stricter sanitization thresholds. Modes stack: --compliance all
 applies the union of all frameworks.
 """
 
-import re
 import logging
 from dataclasses import dataclass, field
-from pathlib import Path
 
 log = logging.getLogger("hygeia.compliance")
 

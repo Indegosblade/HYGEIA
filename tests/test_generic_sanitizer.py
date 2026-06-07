@@ -126,7 +126,7 @@ def test_sensitive_column_redaction():
         (1, "test@test.com", "secret123", "jdoe", "John Doe"),
         (2, "admin@corp.com", "hunter2", "admin", "Admin User"),
     ])})
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     rows = conn.execute("SELECT email, password, username FROM users").fetchall()
     conn.close()
@@ -146,7 +146,7 @@ def test_pii_table_nuking():
             (1, "version", "1.0"),
         ]),
     })
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     autofill_count = conn.execute("SELECT COUNT(*) FROM autofill").fetchone()[0]
     config_count = conn.execute("SELECT COUNT(*) FROM system_config").fetchone()[0]
@@ -217,7 +217,7 @@ def test_compliance_extra_columns():
         (1, "P12345", "MRN-001", "Type 2 Diabetes"),
     ])})
     extra_cols = {"patient_id", "mrn", "diagnosis"}
-    result = sanitize_database_generic(db, extra_columns=extra_cols)
+    sanitize_database_generic(db, extra_columns=extra_cols)
     conn = sqlite3.connect(str(db))
     row = conn.execute("SELECT patient_id, mrn, diagnosis FROM patients").fetchone()
     conn.close()
@@ -233,7 +233,7 @@ def test_compliance_extra_tables():
         ]),
     })
     extra_tbls = {"purchase_history"}
-    result = sanitize_database_generic(db, extra_tables=extra_tbls)
+    sanitize_database_generic(db, extra_tables=extra_tbls)
     conn = sqlite3.connect(str(db))
     count = conn.execute("SELECT COUNT(*) FROM purchase_history").fetchone()[0]
     conn.close()
@@ -291,7 +291,7 @@ def test_aws_key_detection():
         (1, "aws_key=AKIAIOSFODNN7EXAMPLE"),
         (2, "safe value"),
     ])})
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     val = conn.execute("SELECT value FROM configs WHERE id=1").fetchone()[0]
     conn.close()
@@ -303,7 +303,7 @@ def test_eth_wallet_detection():
     db = _make_db({"wallets": ("id INTEGER, addr TEXT", [
         (1, "Send to 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28"),
     ])})
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     val = conn.execute("SELECT addr FROM wallets WHERE id=1").fetchone()[0]
     conn.close()
@@ -315,7 +315,7 @@ def test_url_credentials_detection():
     db = _make_db({"urls": ("id INTEGER, link TEXT", [
         (1, "Connect to ftp://admin:secret@192.168.1.1/files"),
     ])})
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     val = conn.execute("SELECT link FROM urls WHERE id=1").fetchone()[0]
     conn.close()
@@ -327,7 +327,7 @@ def test_uk_nino_detection():
     db = _make_db({"records": ("id INTEGER, info TEXT", [
         (1, "NI number: AB123456C"),
     ])})
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     val = conn.execute("SELECT info FROM records WHERE id=1").fetchone()[0]
     conn.close()
@@ -339,7 +339,7 @@ def test_vin_detection():
     db = _make_db({"vehicles": ("id INTEGER, vin_num TEXT", [
         (1, "VIN: 1HGBH41JXMN109186"),
     ])})
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     val = conn.execute("SELECT vin_num FROM vehicles WHERE id=1").fetchone()[0]
     conn.close()
@@ -359,7 +359,7 @@ def test_expanded_pii_tables():
             (1, "keep me"),
         ]),
     })
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     ff_count = conn.execute("SELECT COUNT(*) FROM moz_formhistory").fetchone()[0]
     dl_count = conn.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]
@@ -376,7 +376,7 @@ def test_expanded_sensitive_columns():
         "id INTEGER, passport TEXT, drivers_license TEXT, salary TEXT, imei TEXT, ssid TEXT",
         [(1, "C12345678", "D1234567", "$85000", "353456789012345", "MyHomeWifi"),]
     )})
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     row = conn.execute("SELECT passport, drivers_license, salary, imei, ssid FROM profiles").fetchone()
     conn.close()
@@ -503,7 +503,7 @@ def test_new_sensitive_columns():
         "id INTEGER, sin TEXT, tfn TEXT, swift TEXT, bic TEXT, routing TEXT",
         [(1, "046454286", "123456789", "DEUTDEDB", "CHASUS33", "021000021")]
     )})
-    result = sanitize_database_generic(db)
+    sanitize_database_generic(db)
     conn = sqlite3.connect(str(db))
     row = conn.execute("SELECT sin, tfn, swift, bic, routing FROM financial").fetchone()
     conn.close()

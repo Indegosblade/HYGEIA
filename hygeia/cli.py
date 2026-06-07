@@ -17,12 +17,14 @@ from pathlib import Path
 
 from .scanner import FileScanner, FileAction, ScanResult
 from .sqlite_sanitizer import (
-    delete_database, sanitize_database, sanitize_knowledgec,
+    delete_database, sanitize_knowledgec,
     sanitize_photos_sqlite, delete_wal_orphans, find_all_databases,
-    sanitize_database_generic, is_sqlite_database,
 )
+from .platform_handlers import sanitize_with_platform_detection
 from .plist_sanitizer import sanitize_plist
-from .exif_stripper import strip_exif_directory, exiftool_available, find_exiftool
+from .exif_stripper import strip_exif_directory, find_exiftool
+from .pdf_stripper import strip_pdf_directory
+from .office_stripper import strip_office_directory
 from .text_sanitizer import sanitize_all_text_files
 from .filesystem_sanitizer import sanitize_filesystem
 from .compliance import get_compliance_profile, generate_compliance_report
@@ -115,7 +117,10 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
                 elif full_path.exists():
                     actions.append(sanitize_plist(full_path))
 
-    # Generic database scan — runs on ALL databases regardless of platform
+    # Platform-detected + generic database scan -- runs on ALL databases.
+    # sanitize_with_platform_detection auto-detects schema, runs a surgical
+    # platform handler if recognised, then falls back to the generic scanner
+    # as a residual sweep.  Unrecognised databases get only the generic scan.
     databases = find_all_databases(work_path)
     extra_cols = compliance.extra_sensitive_columns if compliance else None
     extra_tbls = compliance.extra_pii_tables if compliance else None
@@ -130,7 +135,7 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
         futures_map = {}
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for idx, db in enumerate(databases):
-                future = executor.submit(sanitize_database_generic, db,
+                future = executor.submit(sanitize_with_platform_detection, db,
                                          extra_cols, extra_tbls)
                 futures_map[future] = idx
             completed = 0
@@ -140,18 +145,23 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
                 result = future.result()
                 db_results[idx] = result
                 log.info(f"Sanitizing database {completed}/{total_dbs}: {databases[idx].name}")
-                if result.get("rows_redacted", 0) > 0:
-                    print(f"    {databases[idx].name}: {result['rows_redacted']} rows redacted "
+                rows = result.get("rows_deleted", 0) + result.get("rows_redacted", 0)
+                if rows > 0:
+                    platform = result.get("platform", "generic")
+                    print(f"    {databases[idx].name} [{platform}]: {rows} rows sanitized "
                           f"({', '.join(result.get('pii_types_found', []))})")
         actions.extend(db_results)
     else:
         # Sequential database sanitization
         for i, db in enumerate(databases):
             log.info(f"Sanitizing database {i + 1}/{total_dbs}: {db.name}")
-            result = sanitize_database_generic(db, extra_columns=extra_cols, extra_tables=extra_tbls)
+            result = sanitize_with_platform_detection(db, extra_cols, extra_tbls)
             actions.append(result)
-            if result.get("rows_redacted", 0) > 0:
-                print(f"    {db.name}: {result['rows_redacted']} rows redacted ({', '.join(result.get('pii_types_found', []))})")
+            rows = result.get("rows_deleted", 0) + result.get("rows_redacted", 0)
+            if rows > 0:
+                platform = result.get("platform", "generic")
+                print(f"    {db.name} [{platform}]: {rows} rows sanitized "
+                      f"({', '.join(result.get('pii_types_found', []))})")
 
     if not dry_run:
         orphans = delete_wal_orphans(work_path)
@@ -248,7 +258,7 @@ def main():
     # Resolve workers: 0 = auto-detect, else use as-is (clamped to >=1 inside helpers)
     workers = _resolve_workers(args.workers)
 
-    print(f"=== HYGEIA Forensic-Grade PII Sanitization ===")
+    print("=== HYGEIA Forensic-Grade PII Sanitization ===")
     print(f"Input:  {input_path}")
     print(f"Output: {output_path}")
     print(f"Mode:   {'DRY RUN' if args.dry_run else 'LIVE'}")
@@ -281,7 +291,6 @@ def main():
     print("[2/7] Sanitizing databases...")
     db_actions = sanitize_databases(work_path, scan_result, compliance, args.dry_run, workers=workers)
     all_actions.extend(db_actions)
-    db_sanitized = sum(1 for a in db_actions if a.get("rows_redacted", 0) > 0)
     print(f"  Databases processed: {sum(1 for a in db_actions if 'sanitize' in a.get('action', ''))}")
     print()
 
@@ -308,17 +317,29 @@ def main():
             print(f"  Timestamps normalized: {ts_action.get('files_normalized', 0)} files")
     print()
 
-    # [5/7] EXIF
+    # [5/7] EXIF + PDF + Office metadata
     if not args.skip_exif and not args.dry_run:
-        print("[5/7] Stripping EXIF metadata...")
+        print("[5/7] Stripping image EXIF metadata...")
         exif_result = strip_exif_directory(work_path)
         all_actions.append(exif_result)
         if exif_result.get("skipped"):
-            print(f"  WARNING: exiftool not found — EXIF metadata was NOT stripped")
+            print("  WARNING: exiftool not found — EXIF metadata was NOT stripped")
         else:
             print(f"  Images processed: {exif_result.get('files_stripped', 0)}")
+
+        print("      Stripping PDF metadata...")
+        pdf_result = strip_pdf_directory(work_path)
+        all_actions.append(pdf_result)
+        print(f"  PDFs processed: {pdf_result.get('files_processed', 0)}, "
+              f"modified: {pdf_result.get('files_modified', 0)}")
+
+        print("      Stripping Office document metadata...")
+        office_result = strip_office_directory(work_path)
+        all_actions.append(office_result)
+        print(f"  Office docs processed: {office_result.get('files_processed', 0)}, "
+              f"modified: {office_result.get('files_modified', 0)}")
     else:
-        print("[5/7] EXIF stripping: skipped")
+        print("[5/7] EXIF/PDF/Office stripping: skipped")
     print()
 
     # [5b/7] Forensic hardening
