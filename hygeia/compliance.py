@@ -6,10 +6,7 @@ stricter sanitization thresholds. Modes stack: --compliance all
 applies the union of all frameworks.
 """
 
-import logging
 from dataclasses import dataclass, field
-
-log = logging.getLogger("hygeia.compliance")
 
 HIPAA_18_IDENTIFIERS = [
     "names",

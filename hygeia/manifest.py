@@ -7,22 +7,11 @@ Aligned with NIST SP 800-88, HIPAA Safe Harbor, and GDPR.
 """
 
 import json
-import hashlib
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("hygeia.manifest")
-
-
-def _sha256(filepath: Path) -> str:
-    """Return the SHA256 hex digest of a file's contents."""
-    h = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _detect_ios_version(dump_path: Path) -> str:
@@ -45,7 +34,7 @@ def generate_manifest(
     sanitization_actions: list[dict],
     verification_result,
     elapsed_seconds: float = 0,
-    output_path: Optional[Path] = None,
+    output_path: Path | None = None,
 ) -> dict:
     """
     Generate JSON audit manifest.

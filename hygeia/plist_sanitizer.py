@@ -15,24 +15,15 @@ buried in arbitrary keys — emails in cloud.quota.plist, phone numbers,
 MAC addresses, IMEI, IP addresses, etc.
 """
 
-import hashlib
 import json
 import plistlib
 import logging
 from pathlib import Path
 
 from hygeia.text_sanitizer import _redact_pii_in_string
+from .utils import sha256 as _sha256
 
 log = logging.getLogger("hygeia.plist")
-
-
-def _sha256(filepath: Path) -> str:
-    """Return the SHA256 hex digest of a file's contents."""
-    h = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 SENSITIVE_KEY_PATTERNS = [
     "email", "token", "auth", "password", "phone",

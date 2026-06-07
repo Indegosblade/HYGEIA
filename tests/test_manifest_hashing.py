@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hygeia.sqlite_sanitizer import sanitize_database_generic
 from hygeia.forensic_cleaner import clean_swap_temp_files
-from hygeia.manifest import _sha256
+from hygeia.utils import sha256 as _sha256
 
 
 # ---------------------------------------------------------------------------
