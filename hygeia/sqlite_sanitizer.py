@@ -1,4 +1,4 @@
-"""
+﻿"""
 HYGEIA SQLite Sanitizer -- WAL-aware database sanitization pipeline.
 
 SQLite WAL files contain 50-95% of deleted records with full PII.
@@ -300,6 +300,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         "search_history", "recent_searches",
         "purchase_history", "geolocation",
         "browsing_history", "form_history",
+        "stats_table", "location_history",
     }
 
     # Columns to skip even if name matches — contain system/structural data
