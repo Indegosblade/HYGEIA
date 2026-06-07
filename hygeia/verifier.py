@@ -78,16 +78,42 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
             val = abs(float(match_text))
             if val > 180.0 or val < 1.0:
                 return True
+            # Leading-zero integer part (e.g. 07.6100) is a version number,
+            # not a GPS coordinate — real coords have 2-3 digit integer parts.
+            if match_text.lstrip("-").startswith("0") and not match_text.lstrip("-").startswith("0."):
+                return True
         except ValueError:
             pass
+        # Version-like values: exactly 4 decimal places in a .plist or .json
+        # file are almost never GPS (e.g. 11.5600 from a CFBundleVersion key).
+        import re as _re
+        if _re.search(r'\.\d{4}$', match_text):
+            fname = path.split("/")[-1].split("\\")[-1]
+            if fname.endswith(".plist") or fname.endswith(".json"):
+                return True
+        # Noisy column: external_mod_tag is a sync-tag integer, not GPS.
+        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
+        if col_part.lower() == "external_mod_tag":
+            return True
     # SSN: CoreData internal columns (Z_PK, Z_ENT, Z_OPT, ROWID …) hold
     # sequential integers that happen to match the 9-digit SSN pattern.
     if pattern_name == "ssn":
         col_part = path.rsplit(".", 1)[-1] if "." in path else ""
         if col_part.lower() in {"rowid", "z_pk", "z_ent", "z_opt", "z_cnt", "z_max", "z_min", "z_version"}:
             return True
+        # Bare 9-digit integers (no dash/space separators) in .plist and
+        # .json files are almost never real SSNs — they are timestamps,
+        # Apple config integers, CoreData sequence numbers, and the like.
+        # Real SSN storage in iOS uses dashes (XXX-XX-XXXX) or spaces.
+        import re as _re
+        if _re.match(r'^\d{9}$', match_text):
+            fname = path.split("/")[-1].split("\\")[-1]
+            if fname.endswith(".plist") or fname.endswith(".json") or fname.endswith(".sqlitedb") or fname.endswith(".db"):
+                return True
     # IPv4: Apple's 17/8 public infrastructure block and RFC-1918 private
     # ranges are not user-identifying IPs — suppress in verifier only.
+    # Also filter addresses where all four octets are single digits — those
+    # are version numbers (e.g. 2.3.5.8) not real IPs.
     if pattern_name == "ip_v4":
         parts = match_text.split(".")
         if len(parts) == 4:
@@ -101,15 +127,47 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
                     return True
                 if first == 192 and second == 168:
                     return True
+                # Single-digit octets throughout — looks like a version string
+                # (2.3.5.8) rather than a real IP address.
+                if all(len(p) == 1 for p in parts):
+                    return True
             except ValueError:
                 pass
+    # phone_us: repeated-digit numbers are Apple demo/placeholder data
+    # (e.g. 3333333334 in tipsd.plist).  Suppress when 7+ of the 10 digits
+    # are the same value.
+    if pattern_name == "phone_us":
+        digits = "".join(c for c in match_text if c.isdigit())
+        if len(digits) >= 10:
+            from collections import Counter
+            most_common_count = Counter(digits).most_common(1)[0][1]
+            if most_common_count >= 7:
+                return True
+    # credit_card: known test/demo card numbers (Mastercard test, Visa test,
+    # Stripe test) and Apple Tips placeholder cards should not be reported.
+    if pattern_name == "credit_card":
+        digits = "".join(c for c in match_text if c.isdigit())
+        TEST_CARDS = {
+            "5555555555554444",  # Mastercard test (standard)
+            "5555555555555556",  # Mastercard test (variant)
+            "4111111111111111",  # Visa test
+            "4242424242424242",  # Stripe Visa test
+            "378282246310005",   # Amex test
+            "371449635398431",   # Amex test (alt)
+        }
+        if digits in TEST_CARDS:
+            return True
+        # All-same-digit cards are obviously synthetic
+        if len(set(digits)) == 1:
+            return True
     # Skip already-redacted values
     if "[REDACTED" in match_text or "REDACTED_" in match_text:
         return True
     # Skip URL columns — they contain tracking IDs, product numbers, and
     # fragments that match numeric PII patterns but aren't actual PII
     noisy_columns = ("url", "page_url", "top_level_url", "referrer", "etag",
-                     "fill_into_edit", "text", "contents", "value")
+                     "fill_into_edit", "text", "contents", "value",
+                     "external_mod_tag")
     if pattern_name in ("phone_us", "phone_intl", "credit_card", "ssn", "gps_coord", "imei", "iban", "mac_addr"):
         col_part = path.rsplit(".", 1)[-1] if "." in path else ""
         if col_part in noisy_columns:
@@ -122,12 +180,20 @@ def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024) -> l
     matches = []
     scanned = 0
 
+    # HYGEIA output files — skip them to avoid the manifest self-reporting loop
+    # where PII values logged in the manifest are re-found by the verifier.
+    HYGEIA_OUTPUT_FILES = {"manifest.json", "manifest.txt"}
+
     for f in dump_path.rglob("*"):
         if not f.is_file():
             continue
         if f.suffix.lower() not in TEXT_SCANNABLE:
             continue
         if f.stat().st_size > max_file_size:
+            continue
+
+        # Skip HYGEIA-generated output files
+        if f.name.lower() in HYGEIA_OUTPUT_FILES:
             continue
 
         # Skip system directories (too many false positives)

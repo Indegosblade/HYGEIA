@@ -179,11 +179,38 @@ def _try_scan_nested_plist_bytes(value: bytes, found_types: list, path: str):
         return None
 
 
+# Key-name fragments that strongly suggest an integer value encodes a phone
+# number rather than a size, count, or other non-PII numeric field.
+_PHONE_KEY_HINTS = frozenset({
+    "phone", "mobile", "cell", "msisdn", "phonenumber", "phoneno",
+    "mdn", "callerid", "contactnumber",
+})
+
+
+def _key_suggests_phone(key: str) -> bool:
+    """Return True if the plist key name suggests the integer value is a phone number."""
+    k = key.lower().replace("_", "").replace("-", "").replace(" ", "")
+    return any(hint in k for hint in _PHONE_KEY_HINTS)
+
+
 def _regex_scan_plist(obj, found_types: list, path: str = ""):
     """
     Recursively walk ALL string values in a plist structure and apply
-    PII_PATTERNS regex scanning.  Only string values are touched — booleans,
-    integers, floats, dates are left unchanged.
+    PII_PATTERNS regex scanning.  String values are the primary target.
+
+    Also handles two edge cases that naive string-only scanning misses:
+
+    1. Integer values stored under phone-hint keys (e.g. 16044192133 under a
+       key containing "phone" in com.apple.itunescloud.plist).  The integer is
+       converted to its decimal string, scanned against phone PII_PATTERNS, and
+       if a match is found the integer is replaced with 0.  Only phone-hint
+       keys are checked — generic integers (sizes, counts, capacities) are left
+       untouched to avoid false positives.
+
+    2. Dictionary keys that ARE the PII (e.g. Bluetooth device addresses like
+       "50:57:8A:E4:47:FD" used as keys in com.apple.Accessibility.plist).
+       When a key matches a MAC address pattern the entire key+value subtree is
+       replaced with a redacted key name.
 
     bytes values are inspected for embedded XML or binary plists (e.g. the
     CachedBag key in com.apple.facetime.bag.plist).  If the bytes parse as a
@@ -201,22 +228,49 @@ def _regex_scan_plist(obj, found_types: list, path: str = ""):
         for key in list(obj.keys()):
             value = obj[key]
             child_path = f"{path}.{key}" if path else key
+
+            # --- Key PII scan: catch MAC addresses (and similar) used as keys ---
+            # current_key tracks the actual key name after any potential rename.
+            current_key = key
+            key_redacted, key_types = _redact_pii_in_string(key)
+            if key_types:
+                # Rename the key so the PII no longer appears in the plist
+                current_key = key_redacted
+                obj[current_key] = obj.pop(key)
+                for t in key_types:
+                    found_types.append((f"{path}[key:{t}]", t))
+                # Continue scanning the value under the new key name
+                value = obj[current_key]
+                child_path = f"{path}.{current_key}" if path else current_key
+
             if isinstance(value, str):
                 # Skip values already sanitized by pass 1
                 if value == "[REDACTED]" or value.startswith("[REDACTED_"):
                     continue
                 redacted, types = _redact_pii_in_string(value)
                 if types:
-                    obj[key] = redacted
+                    obj[current_key] = redacted
                     for t in types:
                         found_types.append((child_path, t))
+            elif isinstance(value, int) and not isinstance(value, bool):
+                # Integer values under phone-hint keys may encode bare phone
+                # numbers (e.g. 16044192133 stored as <integer> in binary
+                # plists).  Generic integers (sizes, counts, capacities) are
+                # deliberately excluded — only phone-hint key names are checked.
+                if _key_suggests_phone(current_key):
+                    int_str = str(value)
+                    _, types = _redact_pii_in_string(int_str)
+                    if types:
+                        obj[current_key] = 0
+                        for t in types:
+                            found_types.append((child_path, t))
             elif isinstance(value, bytes):
                 sanitised = _try_scan_nested_plist_bytes(value, found_types, child_path)
                 if sanitised is not None:
-                    obj[key] = sanitised
+                    obj[current_key] = sanitised
             elif isinstance(value, (dict, list)):
                 _regex_scan_plist(value, found_types, child_path)
-            # bool, int, float, datetime — leave untouched
+            # bool, float, datetime — leave untouched
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
             child_path = f"{path}[{i}]"
