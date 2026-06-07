@@ -10,12 +10,22 @@ a "redact all values" mode is available that zeros every string and numeric
 value regardless of key name, preserving only the plist structure.
 """
 
+import hashlib
 import json
 import plistlib
 import logging
 from pathlib import Path
 
 log = logging.getLogger("hygeia.plist")
+
+
+def _sha256(filepath: Path) -> str:
+    """Return the SHA256 hex digest of a file's contents."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 SENSITIVE_KEY_PATTERNS = [
     "email", "token", "auth", "password", "phone",
@@ -149,6 +159,7 @@ def sanitize_plist(filepath: Path) -> dict:
     }
 
     try:
+        result["hash_before"] = _sha256(filepath)
         with open(filepath, "rb") as f:
             data = plistlib.load(f)
     except Exception as e:
@@ -176,4 +187,5 @@ def sanitize_plist(filepath: Path) -> dict:
         except Exception as e:
             result["error"] = f"Failed to write: {e}"
 
+    result["hash_after"] = _sha256(filepath)
     return result
