@@ -96,7 +96,7 @@ def test_data_ark_all_values_redacted():
             "UniqueChipID": 123456789,
             "WiFiAddress": "aa:bb:cc:dd:ee:ff",
             "BluetoothAddress": "aa:bb:cc:dd:ee:00",
-            "DeviceName": "Kevin's iPhone",
+            "DeviceName": "Lars's iPhone",
             "ProductType": "iPhone12,8",
             "MLBSerialNumber": "FAKEMLBSERIAL",
             "activation-state": "Activated",
