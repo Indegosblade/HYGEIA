@@ -626,6 +626,78 @@ def test_nested_plist_bytes_multiple_pii_types():
         # Non-PII structure preserved
         assert sanitized["Enabled"] is True
 
+# ---------------------------------------------------------------------------
+# Residual false-positive fixes (fix/verification-residuals)
+# ---------------------------------------------------------------------------
+
+def test_mac_address_used_as_dict_key_is_redacted():
+    """Bluetooth device MACs used as dictionary keys (com.apple.Accessibility.plist
+    pattern) must be renamed to redacted keys so the MAC no longer appears in
+    the plist structure."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.Accessibility.plist"
+        data = {
+            "50:57:8A:E4:47:FD": {
+                "DeviceName": "TestBTDevice",
+                "Connected": True,
+            },
+            "SafeKey": "value",
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        # The key PII scan should have flagged the MAC
+        assert result["regex_hits"], (
+            f"Expected regex hits for MAC-as-key, got none. "
+            f"regex_hits={result['regex_hits']}"
+        )
+
+        sanitized = _read_plist(plist_path)
+        # The raw MAC must not appear as any key in the output
+        assert "50:57:8A:E4:47:FD" not in sanitized, (
+            f"Raw MAC address still present as a key: {list(sanitized.keys())}"
+        )
+        # Safe key must be preserved
+        assert "SafeKey" in sanitized
+
+
+def test_integer_phone_under_phone_key_is_redacted():
+    """A phone number stored as a bare integer (e.g. 16044192133) under a key
+    whose name contains a phone hint but is NOT caught by Pass 1 key-based
+    sanitization (i.e. no SENSITIVE_KEY_PATTERNS match) must be zeroed out by
+    the regex scan in Pass 2.
+
+    Uses 'MobileDeviceContact' — 'mobile' matches _key_suggests_phone but is
+    NOT in SENSITIVE_KEY_PATTERNS, so Pass 1 skips it, forcing Pass 2 to act.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.itunescloud.plist"
+        data = {
+            "DSPersonID": 12345678,            # generic int — must be untouched
+            "MobileDeviceContact": 16044192133, # phone int under mobile-hint key
+            "StorefrontID": "143441",
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hit_types = [t for _, t in result["regex_hits"]]
+        assert "phone_us" in hit_types, (
+            f"Expected phone_us regex hit for integer phone, got: {result['regex_hits']}"
+        )
+
+        sanitized = _read_plist(plist_path)
+        assert sanitized["MobileDeviceContact"] == 0, (
+            f"Phone integer should be zeroed, got: {sanitized['MobileDeviceContact']}"
+        )
+        # Generic integer under non-phone key must be untouched
+        assert sanitized["DSPersonID"] == 12345678, (
+            f"Non-phone integer should be untouched, got: {sanitized['DSPersonID']}"
+        )
+        assert sanitized["StorefrontID"] == "143441"
+
+
 if __name__ == "__main__":
     test_sensitive_key_detection()
     test_plist_sanitization()
@@ -649,4 +721,6 @@ if __name__ == "__main__":
     test_nested_binary_plist_bytes_phone_redacted()
     test_bytes_with_certificate_left_untouched()
     test_nested_plist_bytes_multiple_pii_types()
+    test_mac_address_used_as_dict_key_is_redacted()
+    test_integer_phone_under_phone_key_is_redacted()
     print("All tests passed.")
