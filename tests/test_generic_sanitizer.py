@@ -272,6 +272,119 @@ def test_non_sqlite_file():
     Path(f.name).unlink()
 
 
+def test_jwt_detection():
+    db = _make_db({"tokens": ("id INTEGER, data TEXT", [
+        (1, "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"),
+        (2, "No token here"),
+    ])})
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 1
+    conn = sqlite3.connect(str(db))
+    val = conn.execute("SELECT data FROM tokens WHERE id=1").fetchone()[0]
+    conn.close()
+    assert "eyJhbGci" not in val, f"JWT survived: {val}"
+    db.unlink()
+
+
+def test_aws_key_detection():
+    db = _make_db({"configs": ("id INTEGER, value TEXT", [
+        (1, "aws_key=AKIAIOSFODNN7EXAMPLE"),
+        (2, "safe value"),
+    ])})
+    result = sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    val = conn.execute("SELECT value FROM configs WHERE id=1").fetchone()[0]
+    conn.close()
+    assert "AKIAIOSFODNN7EXAMPLE" not in val, f"AWS key survived: {val}"
+    db.unlink()
+
+
+def test_eth_wallet_detection():
+    db = _make_db({"wallets": ("id INTEGER, addr TEXT", [
+        (1, "Send to 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28"),
+    ])})
+    result = sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    val = conn.execute("SELECT addr FROM wallets WHERE id=1").fetchone()[0]
+    conn.close()
+    assert "0x742d35Cc6634" not in val, f"ETH wallet survived: {val}"
+    db.unlink()
+
+
+def test_url_credentials_detection():
+    db = _make_db({"urls": ("id INTEGER, link TEXT", [
+        (1, "Connect to ftp://admin:secret@192.168.1.1/files"),
+    ])})
+    result = sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    val = conn.execute("SELECT link FROM urls WHERE id=1").fetchone()[0]
+    conn.close()
+    assert "admin:secret@" not in val, f"URL creds survived: {val}"
+    db.unlink()
+
+
+def test_uk_nino_detection():
+    db = _make_db({"records": ("id INTEGER, info TEXT", [
+        (1, "NI number: AB123456C"),
+    ])})
+    result = sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    val = conn.execute("SELECT info FROM records WHERE id=1").fetchone()[0]
+    conn.close()
+    assert "AB123456C" not in val, f"UK NINO survived: {val}"
+    db.unlink()
+
+
+def test_vin_detection():
+    db = _make_db({"vehicles": ("id INTEGER, vin_num TEXT", [
+        (1, "VIN: 1HGBH41JXMN109186"),
+    ])})
+    result = sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    val = conn.execute("SELECT vin_num FROM vehicles WHERE id=1").fetchone()[0]
+    conn.close()
+    assert "1HGBH41JXMN109186" not in val, f"VIN survived: {val}"
+    db.unlink()
+
+
+def test_expanded_pii_tables():
+    db = _make_db({
+        "moz_formhistory": ("id INTEGER, fieldname TEXT, value TEXT", [
+            (1, "email", "user@test.com"),
+        ]),
+        "downloads": ("id INTEGER, url TEXT", [
+            (1, "https://example.com/file.pdf"),
+        ]),
+        "safe_table": ("id INTEGER, val TEXT", [
+            (1, "keep me"),
+        ]),
+    })
+    result = sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    ff_count = conn.execute("SELECT COUNT(*) FROM moz_formhistory").fetchone()[0]
+    dl_count = conn.execute("SELECT COUNT(*) FROM downloads").fetchone()[0]
+    safe_count = conn.execute("SELECT COUNT(*) FROM safe_table").fetchone()[0]
+    conn.close()
+    assert ff_count == 0, "moz_formhistory should be nuked"
+    assert dl_count == 0, "downloads should be nuked"
+    assert safe_count == 1, "safe_table should be preserved"
+    db.unlink()
+
+
+def test_expanded_sensitive_columns():
+    db = _make_db({"profiles": (
+        "id INTEGER, passport TEXT, drivers_license TEXT, salary TEXT, imei TEXT, ssid TEXT",
+        [(1, "C12345678", "D1234567", "$85000", "353456789012345", "MyHomeWifi"),]
+    )})
+    result = sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    row = conn.execute("SELECT passport, drivers_license, salary, imei, ssid FROM profiles").fetchone()
+    conn.close()
+    for val in row:
+        assert val == "[REDACTED]", f"Sensitive column not redacted: {val}"
+    db.unlink()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = failed = 0
