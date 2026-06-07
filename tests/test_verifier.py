@@ -1,5 +1,6 @@
 """Tests for post-sanitization PII verifier."""
 
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -19,7 +20,7 @@ def test_clean_directory_passes():
     (root / "safe.txt").write_text("No personal data here at all")
     result = verify_sanitization(root)
     assert result.passed, f"Clean dir should pass, got {result.total_findings} findings"
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_email_detected_in_text():
@@ -29,7 +30,7 @@ def test_email_detected_in_text():
     result = verify_sanitization(root)
     assert not result.passed, "Email should be detected"
     assert any(m.pattern_name == "email" for m in result.pii_matches)
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_phone_detected_in_text():
@@ -38,7 +39,7 @@ def test_phone_detected_in_text():
     (root / "leak.txt").write_text("Call (555) 123-4567 for help")
     result = verify_sanitization(root)
     assert not result.passed
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_ssn_detected_in_text():
@@ -47,7 +48,7 @@ def test_ssn_detected_in_text():
     (root / "leak.txt").write_text("SSN: 123-45-6789")
     result = verify_sanitization(root)
     assert not result.passed
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_email_detected_in_sqlite():
@@ -62,7 +63,7 @@ def test_email_detected_in_sqlite():
     matches = scan_sqlite_content(root)
     assert len(matches) >= 1
     assert any("email" in m.pattern_name for m in matches)
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 def test_freelist_detection():
@@ -86,7 +87,7 @@ def test_freelist_detection():
     conn.close()
     # VACUUM is blocked → finding suppressed (not a sanitization gap)
     assert len(findings) == 0, f"Locked freelist should be suppressed, got: {findings}"
-    import shutil; shutil.rmtree(d, ignore_errors=True)
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def test_false_positive_url_column():
@@ -114,7 +115,7 @@ def test_system_dir_skip():
     (sys_dir / "framework.txt").write_text("admin@apple.com internal")
     matches = scan_text_files(root)
     assert len(matches) == 0, "System paths should be skipped"
-    import shutil; shutil.rmtree(d)
+    shutil.rmtree(d)
 
 
 # ── False-positive fix tests (fix/false-positives-vacuum) ────────────────────
@@ -168,7 +169,6 @@ def test_public_user_ip_is_not_false_positive():
 def test_manifest_files_skipped_by_scanner():
     """manifest.json and MANIFEST.txt are HYGEIA output files — the scanner
     must skip them to avoid the manifest self-reporting loop."""
-    import tempfile, shutil
     d = tempfile.mkdtemp()
     root = Path(d)
     # Write a manifest.json that contains phone numbers that were logged
@@ -307,7 +307,6 @@ def test_coredata_timestamp_cols_ssn_is_false_positive():
 def test_freelist_suppressed_when_vacuum_fails():
     """If VACUUM fails at verification time the freelist finding is suppressed
     (database is locked — expected for Chrome WAL copies)."""
-    import tempfile, shutil
     d = tempfile.mkdtemp()
     db_path = Path(d) / "Login Data"
     # Create a database with free pages
@@ -335,7 +334,6 @@ def test_freelist_suppressed_when_vacuum_fails():
 def test_freelist_cleared_by_verification_vacuum():
     """If free pages exist but VACUUM succeeds at verification time, no finding
     is reported (the database was cleaned on the spot)."""
-    import tempfile, shutil
     d = tempfile.mkdtemp()
     db_path = Path(d) / "test_clearable.db"
     conn = sqlite3.connect(str(db_path))

@@ -9,6 +9,7 @@ tag verification for residual image metadata.
 import re
 import sqlite3
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -84,10 +85,7 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
                 return True
         except ValueError:
             pass
-        # Version-like values: exactly 4 decimal places in a .plist or .json
-        # file are almost never GPS (e.g. 11.5600 from a CFBundleVersion key).
-        import re as _re
-        if _re.search(r'\.\d{4}$', match_text):
+        if re.search(r'\.\d{4}$', match_text):
             fname = path.split("/")[-1].split("\\")[-1]
             if fname.endswith(".plist") or fname.endswith(".json"):
                 return True
@@ -100,7 +98,7 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         # digits, treat it as a layout metric / false positive.
         fname = path.split("/")[-1].split("\\")[-1]
         if fname.endswith(".plist"):
-            decimal_match = _re.search(r'\.(\d+)$', match_text)
+            decimal_match = re.search(r'\.(\d+)$', match_text)
             if decimal_match and len(decimal_match.group(1)) >= 8:
                 return True
         # Noisy column: external_mod_tag is a sync-tag integer, not GPS.
@@ -123,12 +121,7 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         }
         if col_part.lower() in COREDATA_NOISY_COLS:
             return True
-        # Bare 9-digit integers (no dash/space separators) in .plist and
-        # .json files are almost never real SSNs — they are timestamps,
-        # Apple config integers, CoreData sequence numbers, and the like.
-        # Real SSN storage in iOS uses dashes (XXX-XX-XXXX) or spaces.
-        import re as _re
-        if _re.match(r'^\d{9}$', match_text):
+        if re.match(r'^\d{9}$', match_text):
             fname = path.split("/")[-1].split("\\")[-1]
             if fname.endswith(".plist") or fname.endswith(".json") or fname.endswith(".sqlitedb") or fname.endswith(".db"):
                 return True
@@ -161,7 +154,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
     if pattern_name == "phone_us":
         digits = "".join(c for c in match_text if c.isdigit())
         if len(digits) >= 10:
-            from collections import Counter
             most_common_count = Counter(digits).most_common(1)[0][1]
             if most_common_count >= 7:
                 return True
@@ -328,8 +320,11 @@ def scan_sqlite_content(dump_path: Path) -> list[PIIMatch]:
                 except sqlite3.Error:
                     continue
 
-                col_type_matches = lambda t: any(x in t for x in ("TEXT", "VARCHAR", "CHAR", "CLOB")) or t == ""
-                text_cols = [c[1] for c in columns if col_type_matches((c[2] or "").upper())]
+                text_cols = [
+                    c[1] for c in columns
+                    if any(x in (c[2] or "").upper() for x in ("TEXT", "VARCHAR", "CHAR", "CLOB"))
+                    or (c[2] or "") == ""
+                ]
                 for col_name in text_cols:
                     try:
                         cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 1000")

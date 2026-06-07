@@ -17,12 +17,12 @@ from pathlib import Path
 
 from .scanner import FileScanner, FileAction, ScanResult
 from .sqlite_sanitizer import (
-    delete_database, sanitize_database, sanitize_knowledgec,
+    delete_database, sanitize_knowledgec,
     sanitize_photos_sqlite, delete_wal_orphans, find_all_databases,
-    sanitize_database_generic, is_sqlite_database,
+    sanitize_database_generic,
 )
 from .plist_sanitizer import sanitize_plist
-from .exif_stripper import strip_exif_directory, exiftool_available, find_exiftool
+from .exif_stripper import strip_exif_directory, find_exiftool
 from .text_sanitizer import sanitize_all_text_files
 from .filesystem_sanitizer import sanitize_filesystem
 from .compliance import get_compliance_profile, generate_compliance_report
@@ -248,7 +248,7 @@ def main():
     # Resolve workers: 0 = auto-detect, else use as-is (clamped to >=1 inside helpers)
     workers = _resolve_workers(args.workers)
 
-    print(f"=== HYGEIA Forensic-Grade PII Sanitization ===")
+    print("=== HYGEIA Forensic-Grade PII Sanitization ===")
     print(f"Input:  {input_path}")
     print(f"Output: {output_path}")
     print(f"Mode:   {'DRY RUN' if args.dry_run else 'LIVE'}")
@@ -281,7 +281,6 @@ def main():
     print("[2/7] Sanitizing databases...")
     db_actions = sanitize_databases(work_path, scan_result, compliance, args.dry_run, workers=workers)
     all_actions.extend(db_actions)
-    db_sanitized = sum(1 for a in db_actions if a.get("rows_redacted", 0) > 0)
     print(f"  Databases processed: {sum(1 for a in db_actions if 'sanitize' in a.get('action', ''))}")
     print()
 
@@ -314,7 +313,7 @@ def main():
         exif_result = strip_exif_directory(work_path)
         all_actions.append(exif_result)
         if exif_result.get("skipped"):
-            print(f"  WARNING: exiftool not found — EXIF metadata was NOT stripped")
+            print("  WARNING: exiftool not found — EXIF metadata was NOT stripped")
         else:
             print(f"  Images processed: {exif_result.get('files_stripped', 0)}")
     else:

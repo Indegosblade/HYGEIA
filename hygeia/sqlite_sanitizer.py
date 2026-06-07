@@ -8,11 +8,9 @@ checkpoint > secure_delete > sanitize > VACUUM > delete WAL.
 
 import hashlib
 import sqlite3
-import os
 import time
 import logging
 from pathlib import Path
-from typing import Optional
 
 log = logging.getLogger("hygeia.sqlite")
 
