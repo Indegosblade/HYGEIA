@@ -53,7 +53,6 @@ def copy_dump(input_path: Path, output_path: Path):
 
 
 def _resolve_workers(workers: int) -> int:
-    """Resolve worker count: 0 means auto-detect (cpu_count), 1 means sequential."""
     if workers == 0:
         return os.cpu_count() or 1
     return max(1, workers)
@@ -108,10 +107,6 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
                 elif full_path.exists():
                     actions.append(sanitize_plist(full_path))
 
-    # Platform-detected + generic database scan -- runs on ALL databases.
-    # sanitize_with_platform_detection auto-detects schema, runs a surgical
-    # platform handler if recognised, then falls back to the generic scanner
-    # as a residual sweep.  Unrecognised databases get only the generic scan.
     databases = find_all_databases(work_path)
     extra_cols = compliance.extra_sensitive_columns if compliance else None
     extra_tbls = compliance.extra_pii_tables if compliance else None
@@ -159,10 +154,7 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
         for o in orphans:
             actions.append({"action": "delete_orphan_wal", "path": str(o.relative_to(work_path))})
 
-    # Universal plist scan — runs on ALL .plist files regardless of platform/scanner classification.
-    # The iOS scanner-based path above only catches paths matching plist_patterns.json sanitize_paths
-    # (e.g. /mobile/Library/Preferences/). Flat or non-iOS dumps miss this entirely.
-    # Track paths already handled by the scanner-based pass to avoid double-processing.
+    # Scanner-based plist path only catches iOS-specific locations; this catches the rest.
     already_sanitized = {
         str(work_path / c.path)
         for c in scan_result.classifications

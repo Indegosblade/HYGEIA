@@ -7,25 +7,18 @@ swap/temp files, file-system timestamps, macOS quarantine xattrs,
 crash reporter data, and clipboard history.
 """
 
-import hashlib
 import logging
 import os
 import platform
 import shutil
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .utils import sha256 as _sha256
+
 log = logging.getLogger("hygeia.forensic_cleaner")
-
-
-def _sha256(filepath: Path) -> str:
-    """Return the SHA256 hex digest of a file's contents."""
-    h = hashlib.sha256()
-    with open(filepath, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 # LevelDB
@@ -536,22 +529,8 @@ def clean_clipboard_history(dry_run=False):
     return actions
 
 
-# Master function
-
-
 def forensic_clean_all(dump_path, dry_run=False, workers=1):
-    """Run all forensic cleaning sub-tasks.
-
-    Args:
-        dump_path: Root directory to clean.
-        dry_run: Preview actions without executing.
-        workers: Number of parallel workers for independent sub-tasks.
-                 1 = sequential (default), 0 = auto-detect, >1 = explicit pool.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
-    from pathlib import Path as _Path
-
-    dump_path = _Path(dump_path)
+    dump_path = Path(dump_path)
     prefix = "DRY RUN " if dry_run else ""
     log.info(f"forensic_clean_all: {prefix}{dump_path} (workers={workers})")
 
@@ -577,7 +556,7 @@ def forensic_clean_all(dump_path, dry_run=False, workers=1):
                 future = executor.submit(fn, dump_path, dry_run)
                 futures_map[future] = name
             completed = 0
-            for future in _as_completed(futures_map):
+            for future in as_completed(futures_map):
                 name = futures_map[future]
                 completed += 1
                 subtask_results[name] = future.result()
