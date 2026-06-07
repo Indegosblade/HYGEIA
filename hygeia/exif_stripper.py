@@ -6,6 +6,7 @@ Removes GPS coordinates, device make/model, timestamps, and all
 other embedded tags.
 """
 
+import os
 import subprocess
 import shutil
 import logging
@@ -37,6 +38,11 @@ def find_exiftool() -> str | None:
     for candidate in _EXIFTOOL_FALLBACK_PATHS:
         if Path(candidate).is_file():
             return candidate
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        winget_path = Path(localappdata) / "Programs" / "ExifTool" / "ExifTool.exe"
+        if winget_path.is_file():
+            return str(winget_path)
     return None
 
 
