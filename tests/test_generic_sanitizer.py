@@ -385,6 +385,133 @@ def test_expanded_sensitive_columns():
     db.unlink()
 
 
+def test_sin_tfn_detection():
+    """Canadian SIN / Australian TFN: 3-3-3 digit groups with separators."""
+    db = _make_db({"records": ("id INTEGER, info TEXT", [
+        (1, "SIN: 046 454 286"),
+        (2, "TFN: 123-456-789"),
+        (3, "No identifier here"),
+    ])})
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 2, f"Expected 2+ redacted, got {result['rows_redacted']}"
+    conn = sqlite3.connect(str(db))
+    vals = [r[0] for r in conn.execute("SELECT info FROM records").fetchall()]
+    conn.close()
+    assert not any("046 454 286" in v for v in vals), "SIN survived"
+    assert not any("123-456-789" in v for v in vals), "TFN survived"
+    db.unlink()
+
+
+def test_swift_bic_detection():
+    """SWIFT/BIC codes: 8-character (AAAABBCC) or 11-character (AAAABBCCDDD)."""
+    db = _make_db({"payments": ("id INTEGER, note TEXT", [
+        (1, "Wire to DEUTDEDB"),
+        (2, "BIC: CHASUS33XXX"),
+        (3, "No bank code here"),
+    ])})
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 2, f"Expected 2+ redacted, got {result['rows_redacted']}"
+    conn = sqlite3.connect(str(db))
+    vals = [r[0] for r in conn.execute("SELECT note FROM payments").fetchall()]
+    conn.close()
+    assert not any("DEUTDEDB" in v for v in vals), "SWIFT 8-char survived"
+    assert not any("CHASUS33XXX" in v for v in vals), "SWIFT 11-char survived"
+    db.unlink()
+
+
+def test_us_routing_detection():
+    """US routing numbers: 9 digits starting with 01-32."""
+    db = _make_db({"bank": ("id INTEGER, info TEXT", [
+        (1, "Routing: 021000021"),
+        (2, "ABA: 111000025"),
+        (3, "Not a routing 990000000"),
+    ])})
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 2, f"Expected 2+ redacted, got {result['rows_redacted']}"
+    conn = sqlite3.connect(str(db))
+    vals = [r[0] for r in conn.execute("SELECT info FROM bank").fetchall()]
+    conn.close()
+    assert not any("021000021" in v for v in vals), "Routing number survived"
+    db.unlink()
+
+
+def test_imei_detection():
+    """IMEI: 15 digits with optional separators (dd-dddddd-dddddd-d)."""
+    db = _make_db({"devices": ("id INTEGER, data TEXT", [
+        (1, "IMEI: 35-209900-176148-1"),
+        (2, "No IMEI here"),
+    ])})
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 1, f"Expected 1+ redacted, got {result['rows_redacted']}"
+    conn = sqlite3.connect(str(db))
+    vals = [r[0] for r in conn.execute("SELECT data FROM devices").fetchall()]
+    conn.close()
+    assert not any("35-209900-176148-1" in v for v in vals), "IMEI with separators survived"
+    db.unlink()
+
+
+def test_imsi_detection():
+    """IMSI: 15-digit MCC+MNC+MSIN subscriber identity."""
+    db = _make_db({"subs": ("id INTEGER, info TEXT", [
+        (1, "IMSI: 310410123456789"),
+        (2, "No IMSI here"),
+    ])})
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 1, f"Expected 1+ redacted, got {result['rows_redacted']}"
+    conn = sqlite3.connect(str(db))
+    vals = [r[0] for r in conn.execute("SELECT info FROM subs").fetchall()]
+    conn.close()
+    assert not any("310410123456789" in v for v in vals), "IMSI survived"
+    db.unlink()
+
+
+def test_dea_number_detection():
+    """DEA registration numbers: letter-letter/9-digit."""
+    db = _make_db({"rx": ("id INTEGER, info TEXT", [
+        (1, "DEA: AB1234563"),
+        (2, "Prescriber DEA: MJ5432198"),
+        (3, "Not a DEA: ZZ1234567"),
+    ])})
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 2, f"Expected 2+ redacted, got {result['rows_redacted']}"
+    conn = sqlite3.connect(str(db))
+    vals = [r[0] for r in conn.execute("SELECT info FROM rx").fetchall()]
+    conn.close()
+    assert not any("AB1234563" in v for v in vals), "DEA number survived"
+    db.unlink()
+
+
+def test_npi_detection():
+    """NPI: 10-digit National Provider Identifier starting with 1 or 2."""
+    db = _make_db({"providers": ("id INTEGER, info TEXT", [
+        (1, "NPI: 1234567890"),
+        (2, "Provider NPI 2987654321"),
+        (3, "Not an NPI: 9123456789"),
+    ])})
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 2, f"Expected 2+ redacted, got {result['rows_redacted']}"
+    conn = sqlite3.connect(str(db))
+    vals = [r[0] for r in conn.execute("SELECT info FROM providers").fetchall()]
+    conn.close()
+    assert not any("1234567890" in v and "REDACTED" not in v for v in vals), "NPI survived"
+    db.unlink()
+
+
+def test_new_sensitive_columns():
+    """New sensitive column names: sin, tfn, swift, bic, routing."""
+    db = _make_db({"financial": (
+        "id INTEGER, sin TEXT, tfn TEXT, swift TEXT, bic TEXT, routing TEXT",
+        [(1, "046454286", "123456789", "DEUTDEDB", "CHASUS33", "021000021")]
+    )})
+    result = sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    row = conn.execute("SELECT sin, tfn, swift, bic, routing FROM financial").fetchone()
+    conn.close()
+    for val in row:
+        assert val == "[REDACTED]", f"New sensitive column not redacted: {val}"
+    db.unlink()
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = failed = 0
