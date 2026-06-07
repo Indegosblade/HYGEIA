@@ -16,6 +16,15 @@ from typing import Optional
 log = logging.getLogger("hygeia.manifest")
 
 
+def _sha256(filepath: Path) -> str:
+    """Return the SHA256 hex digest of a file's contents."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _detect_ios_version(dump_path: Path) -> str:
     """Detect iOS version from SystemVersion.plist."""
     sv_path = dump_path / "System" / "Library" / "CoreServices" / "SystemVersion.plist"
@@ -64,6 +73,10 @@ def generate_manifest(
             "plists_sanitized": sum(1 for a in sanitization_actions if a.get("action") == "plist_sanitize"),
             "exif_stripped": sum(1 for a in sanitization_actions if a.get("action") == "exif_strip"),
             "bytes_removed": scan_result.delete_size,
+            "files_with_hashes": sum(
+                1 for a in sanitization_actions
+                if "hash_before" in a or "hash_after" in a
+            ),
         },
         "jailbreak": {
             "detected": scan_result.jailbreak.detected if scan_result.jailbreak else False,

@@ -6,6 +6,7 @@ Standard deletion leaves them intact. Every database goes through:
 checkpoint > secure_delete > sanitize > VACUUM > delete WAL.
 """
 
+import hashlib
 import sqlite3
 import os
 import logging
@@ -13,6 +14,15 @@ from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger("hygeia.sqlite")
+
+
+def _sha256(filepath: Path) -> str:
+    """Return the SHA256 hex digest of a file's contents."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 SQLITE_EXTENSIONS = {".sqlite", ".db", ".sqlitedb", ".storedata", ".plsql", ".PLSQL"}
 WAL_SUFFIXES = ["-wal", "-shm", "-journal"]
@@ -328,6 +338,8 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         result["error"] = "Not a SQLite database"
         return result
 
+    result["hash_before"] = _sha256(db_path)
+
     try:
         conn = sqlite3.connect(str(db_path))
         checkpoint_and_prepare(conn)
@@ -460,6 +472,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
 
         result["pii_types_found"] = sorted(pii_found)
         vacuum_and_cleanup(conn, db_path)
+        result["hash_after"] = _sha256(db_path)
         log.info(f"Generic sanitized {db_path.name}: {result['tables_scanned']} tables, "
                  f"{result['rows_redacted']} rows redacted ({pass_count} passes), PII: {result['pii_types_found']}")
 
