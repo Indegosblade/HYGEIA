@@ -33,7 +33,7 @@ def _is_leveldb_dir(path):
 
 def clean_leveldb_stores(dump_path, dry_run=False):
     actions = []
-    for current_file in dump_path.rglob("CURRENT"):
+    for current_file in list(dump_path.rglob("CURRENT")):
         store_dir = current_file.parent
         if not _is_leveldb_dir(store_dir):
             continue
@@ -100,7 +100,7 @@ def clean_thumbnail_caches(dump_path, dry_run=False):
                 deleted_dirs.append(dirpath)
                 actions.append({"action": "delete_cache_dir", "path": rel})
                 log.info(f"Deleted cache dir: {rel}")
-    for fp in dump_path.rglob("*"):
+    for fp in list(dump_path.rglob("*")):
         if not fp.is_file():
             continue
         if _inside_deleted(fp):
@@ -142,7 +142,7 @@ def _is_swap_file(name):
 
 def clean_swap_temp_files(dump_path, dry_run=False):
     actions = []
-    for fp in dump_path.rglob("*"):
+    for fp in list(dump_path.rglob("*")):
         if not fp.is_file():
             continue
         if _is_swap_file(fp.name):
@@ -165,7 +165,7 @@ def normalize_timestamps(dump_path, epoch="2000-01-01"):
     epoch_ts = dt.timestamp()
     normalized = 0
     errors = 0
-    for fp in dump_path.rglob("*"):
+    for fp in list(dump_path.rglob("*")):
         try:
             os.utime(fp, (epoch_ts, epoch_ts))
             normalized += 1
