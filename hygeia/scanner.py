@@ -187,6 +187,18 @@ class FileScanner:
             if pattern.lower().lstrip("/") in path_lower:
                 return FileClassification(rel_path, FileAction.DELETE, f"personal data: {pattern}", size)
 
+        # Database filename patterns — catch personal databases outside their usual directories
+        filename = Path(rel_path).name.lower()
+        for db_name in self.delete_patterns.get("database_patterns", []):
+            if filename == db_name.lower():
+                return FileClassification(rel_path, FileAction.DELETE, f"personal database: {db_name}", size)
+
+        # WiFi plist files — DELETE (contain SSIDs, BSSIDs, passwords — full PII)
+        if path_lower.endswith(".plist"):
+            for wifi_file in self.delete_patterns.get("plist_delete_files", []):
+                if filename == wifi_file.lower():
+                    return FileClassification(rel_path, FileAction.DELETE, f"wifi credentials: {wifi_file}", size)
+
         for ext_pattern in self.delete_patterns.get("extension_patterns", []):
             ext = ext_pattern.get("ext", "")
             scope = ext_pattern.get("scope", "")
