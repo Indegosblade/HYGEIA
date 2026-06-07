@@ -244,6 +244,33 @@ sanitize_database_generic(Path("patient.db"),
 
 ---
 
+## Optional Dependencies
+
+### exiftool (image metadata stripping)
+
+HYGEIA uses [exiftool](https://exiftool.org/) to strip EXIF metadata from images (GPS coordinates, device make/model, timestamps, and all other embedded tags). Without it, step [5/7] is silently skipped and image metadata is **not** removed.
+
+If exiftool is missing at startup, HYGEIA prints:
+
+```
+WARNING: exiftool not installed. Image metadata will NOT be stripped.
+         Install from https://exiftool.org/ to enable EXIF stripping.
+```
+
+**Installation:**
+
+| Platform | Command |
+|----------|---------|
+| macOS | `brew install exiftool` |
+| Debian/Ubuntu | `apt-get install libimage-exiftool-perl` |
+| Windows | Download from [exiftool.org](https://exiftool.org/) and place `exiftool.exe` in `C:\exiftool\` or `C:\Program Files\exiftool\` |
+
+HYGEIA probes `PATH` first, then checks `C:\exiftool\exiftool.exe` and `C:\Program Files\exiftool\exiftool.exe` on Windows and `/usr/bin/exiftool` and `/usr/local/bin/exiftool` on Unix — so a standalone Windows install works without adding it to `PATH`.
+
+To skip EXIF stripping intentionally (e.g. in environments without exiftool), pass `--skip-exif`.
+
+---
+
 ## Architecture
 
 ```
