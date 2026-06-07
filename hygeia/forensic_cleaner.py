@@ -3,13 +3,16 @@ HYGEIA Forensic Cleaner -- anti-forensic hardening module.
 
 Removes artifacts that survive standard file deletion and can be
 recovered by forensic tools: LevelDB stores, thumbnail/browser caches,
-swap/temp files, and file-system timestamps.
+swap/temp files, file-system timestamps, macOS quarantine xattrs,
+crash reporter data, and clipboard history.
 """
 
 import hashlib
 import logging
 import os
+import platform
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -268,6 +271,271 @@ def normalize_timestamps(dump_path, epoch="2000-01-01"):
     return [action]
 
 
+# macOS quarantine / extended attribute cleanup
+
+# xattrs that encode download provenance or quarantine state
+_MACOS_TRACKING_XATTRS = (
+    "com.apple.quarantine",
+    "com.apple.metadata:kMDItemWhereFroms",
+    "com.apple.metadata:kMDItemDownloadedDate",
+)
+
+
+def clean_quarantine_xattrs(dump_path, dry_run=False):
+    """
+    Detect and remove macOS quarantine / download-tracking xattrs.
+
+    Only executes on Darwin (macOS). On all other platforms the function
+    returns an empty action list immediately.
+
+    Uses os.listxattr() / os.removexattr() from the stdlib (Python 3.3+,
+    available on macOS and Linux).
+    """
+    actions = []
+
+    if platform.system() != "Darwin":
+        log.debug("clean_quarantine_xattrs: non-Darwin platform, skipping")
+        return actions
+
+    listxattr = getattr(os, "listxattr", None)
+    removexattr = getattr(os, "removexattr", None)
+    if listxattr is None or removexattr is None:
+        log.debug("clean_quarantine_xattrs: os.listxattr/removexattr not available, skipping")
+        return actions
+
+    for fp in list(dump_path.rglob("*")):
+        try:
+            xattrs = listxattr(str(fp), follow_symlinks=False)
+        except (OSError, ValueError):
+            continue
+
+        for xattr_name in xattrs:
+            if xattr_name in _MACOS_TRACKING_XATTRS:
+                rel = str(fp.relative_to(dump_path))
+                if dry_run:
+                    actions.append({
+                        "action": "remove_xattr",
+                        "path": rel,
+                        "xattr": xattr_name,
+                        "dry_run": True,
+                    })
+                else:
+                    try:
+                        removexattr(str(fp), xattr_name, follow_symlinks=False)
+                        actions.append({
+                            "action": "remove_xattr",
+                            "path": rel,
+                            "xattr": xattr_name,
+                        })
+                        log.info(f"Removed xattr {xattr_name} from {rel}")
+                    except OSError as exc:
+                        log.warning(f"Failed to remove xattr {xattr_name} from {rel}: {exc}")
+
+    log.debug(f"Quarantine xattr cleanup: {len(actions)} xattrs processed")
+    return actions
+
+
+# NTFS Alternate Data Streams detection
+
+def detect_ntfs_ads(dump_path):
+    """
+    Detect NTFS Alternate Data Streams (ADS) in dump_path.
+
+    Only runs on Windows. Uses PowerShell Get-Item -Stream * to enumerate
+    ADS on each file. Logs warnings for any ADS found.
+
+    Returns a list of warning dicts (never deletes — removal requires
+    platform-specific APIs and can corrupt files if done carelessly).
+    """
+    warnings = []
+
+    if platform.system() != "Windows":
+        log.debug("detect_ntfs_ads: non-Windows platform, skipping")
+        return warnings
+
+    # Use PowerShell to enumerate ADS. -ErrorAction SilentlyContinue suppresses
+    # access-denied noise on system files we can't read.
+    ps_script = (
+        "Get-ChildItem -Path '{path}' -Recurse -ErrorAction SilentlyContinue | "
+        "ForEach-Object {{ Get-Item -Path $_.FullName -Stream * -ErrorAction SilentlyContinue }} | "
+        "Where-Object {{ $_.Stream -ne ':$DATA' -and $_.Stream -ne 'Zone.Identifier' }} | "
+        "Select-Object -ExpandProperty FileName"
+    ).format(path=str(dump_path).replace("'", "''"))
+
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps_script],
+            capture_output=True, text=True, timeout=120,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            for line in proc.stdout.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rel = str(Path(line).relative_to(dump_path))
+                except ValueError:
+                    rel = line
+                warnings.append({
+                    "action": "ads_detected",
+                    "path": rel,
+                    "warning": "NTFS Alternate Data Stream found — manual review required",
+                })
+                log.warning(f"NTFS ADS detected: {rel}")
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        log.debug(f"detect_ntfs_ads: PowerShell enumeration failed: {exc}")
+
+    log.debug(f"NTFS ADS detection: {len(warnings)} streams found")
+    return warnings
+
+
+# Crash reporter data cleanup
+
+_CRASH_REPORTER_DIR_NAMES_LOWER = frozenset({
+    "diagnosticmessages",
+    "crashreporter",
+    "reportcrash",
+    "diagnosticreports",
+})
+_CRASH_FILE_SUFFIXES = frozenset({".ips", ".crash"})
+
+
+def clean_crash_reporter_data(dump_path, dry_run=False):
+    """
+    Find and delete crash reporter artifacts.
+
+    Targets:
+    - Directories named DiagnosticMessages/, CrashReporter/, ReportCrash/,
+      DiagnosticReports/ (case-insensitive) anywhere in the tree
+    - Files with .ips or .crash extensions
+    - Library/Logs/DiagnosticReports/ path component
+
+    These artifacts contain usernames, full file paths, and occasionally
+    stack frames with sensitive variable values.
+    """
+    actions = []
+    deleted_dirs: list = []
+
+    def _inside_deleted(p: Path) -> bool:
+        for d in deleted_dirs:
+            try:
+                p.relative_to(d)
+                return True
+            except ValueError:
+                pass
+        return False
+
+    # Walk directories first (sorted by depth so parents are processed before children)
+    all_dirs = sorted(
+        (p for p in dump_path.rglob("*") if p.is_dir()),
+        key=lambda x: len(x.parts),
+    )
+    for dirpath in all_dirs:
+        if _inside_deleted(dirpath):
+            continue
+        name_lower = dirpath.name.lower()
+        rel_lower = str(dirpath.relative_to(dump_path)).replace("\\", "/").lower()
+
+        is_crash_dir = (
+            name_lower in _CRASH_REPORTER_DIR_NAMES_LOWER
+            or "library/logs/diagnosticreports" in rel_lower
+        )
+        if not is_crash_dir:
+            continue
+
+        rel = str(dirpath.relative_to(dump_path))
+        if dry_run:
+            actions.append({"action": "delete_crash_reporter_dir", "path": rel, "dry_run": True})
+        else:
+            shutil.rmtree(dirpath, ignore_errors=True)
+            deleted_dirs.append(dirpath)
+            actions.append({"action": "delete_crash_reporter_dir", "path": rel})
+            log.info(f"Deleted crash reporter dir: {rel}")
+
+    # Then individual .ips / .crash files
+    for fp in list(dump_path.rglob("*")):
+        if not fp.is_file():
+            continue
+        if _inside_deleted(fp):
+            continue
+        if fp.suffix.lower() in _CRASH_FILE_SUFFIXES:
+            rel = str(fp.relative_to(dump_path))
+            if dry_run:
+                actions.append({"action": "delete_crash_file", "path": rel, "dry_run": True})
+            else:
+                action = {"action": "delete_crash_file", "path": rel, "hash_before": _sha256(fp)}
+                fp.unlink(missing_ok=True)
+                actions.append(action)
+                log.info(f"Deleted crash file: {rel}")
+
+    log.debug(f"Crash reporter cleanup: {len(actions)} items found")
+    return actions
+
+
+# Clipboard history cleanup
+
+def clean_clipboard_history(dry_run=False):
+    """
+    Delete platform clipboard history artifacts.
+
+    Windows: %LOCALAPPDATA%\\Microsoft\\Windows\\Clipboard\\
+    macOS:   ~/Library/Application Support/com.apple.UIKit.pboard/
+
+    Returns a list of action dicts. Silently skips platforms that have
+    neither location or where the paths do not exist.
+    """
+    actions = []
+    system = platform.system()
+
+    candidate_dirs: list = []
+
+    if system == "Windows":
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if localappdata:
+            candidate_dirs.append(Path(localappdata) / "Microsoft" / "Windows" / "Clipboard")
+    elif system == "Darwin":
+        home = Path.home()
+        candidate_dirs.append(
+            home / "Library" / "Application Support" / "com.apple.UIKit.pboard"
+        )
+        # Also check the clipboard pasteboard persistence path on macOS 13+
+        candidate_dirs.append(
+            home / "Library" / "Application Support" / "com.apple.clipboarduseragent"
+        )
+
+    for clip_dir in candidate_dirs:
+        if not clip_dir.exists():
+            continue
+        rel = str(clip_dir)
+        if dry_run:
+            actions.append({
+                "action": "delete_clipboard_history",
+                "path": rel,
+                "dry_run": True,
+            })
+        else:
+            # Remove contents but keep the directory itself (system may recreate it)
+            deleted_items = 0
+            for item in list(clip_dir.iterdir()):
+                try:
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
+                    deleted_items += 1
+                except OSError as exc:
+                    log.warning(f"Failed to delete clipboard item {item}: {exc}")
+            actions.append({
+                "action": "delete_clipboard_history",
+                "path": rel,
+                "items_deleted": deleted_items,
+            })
+            log.info(f"Cleared clipboard history: {rel} ({deleted_items} items)")
+
+    log.debug(f"Clipboard cleanup: {len(actions)} locations processed")
+    return actions
+
+
 # Master function
 
 
@@ -290,15 +558,17 @@ def forensic_clean_all(dump_path, dry_run=False, workers=1):
     # Resolve auto-detect
     resolved_workers = workers if workers != 0 else (os.cpu_count() or 1)
 
-    # The three scan/delete sub-tasks are independent of each other
+    # Scan/delete sub-tasks (all operate on dump_path, all independent)
     subtasks = [
         ("leveldb", clean_leveldb_stores),
         ("thumbnail_caches", clean_thumbnail_caches),
         ("swap_temp", clean_swap_temp_files),
+        ("crash_reporter", clean_crash_reporter_data),
+        ("quarantine_xattrs", clean_quarantine_xattrs),
     ]
 
     # Results keyed by subtask name so we can assemble in deterministic order
-    subtask_results: dict[str, list] = {}
+    subtask_results: dict = {}
 
     if resolved_workers > 1 and not dry_run:
         futures_map = {}
@@ -319,6 +589,12 @@ def forensic_clean_all(dump_path, dry_run=False, workers=1):
     actions = []
     for name, _ in subtasks:
         actions.extend(subtask_results[name])
+
+    # NTFS ADS detection (Windows only, detect-only — no deletion)
+    actions.extend(detect_ntfs_ads(dump_path))
+
+    # Clipboard history cleanup (platform-aware, operates outside dump_path)
+    actions.extend(clean_clipboard_history(dry_run=dry_run))
 
     if not dry_run:
         actions.extend(normalize_timestamps(dump_path))
