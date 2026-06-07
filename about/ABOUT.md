@@ -8,9 +8,11 @@
 
 Filesystem dumps from personal devices — phones, laptops, desktops — contain years of accumulated PII: passwords in database WAL files, GPS coordinates embedded in photo EXIF, OAuth tokens in configuration plists, browsing history in SQLite, typed passwords in keyboard caches, facial recognition clusters, search queries, call logs, and messages.
 
+This is true across every platform. Chrome profiles contain login databases, browsing history, autofill data, and saved payment methods. Firefox stores form history, cookies, and site permissions. Android extractions carry contacts, SMS threads, calendar events, and health data. iOS dumps include knowledgeC behavioral databases, Photos.sqlite with GPS and face clusters, and Messages.db. Windows forensic images have prefetch files, jump lists, event logs, and hibernation RAM snapshots. macOS carries TCC permission grants, Spotlight indexes, and quarantine events.
+
 This data makes dumps unusable for sharing, collaboration, publication, or regulatory compliance. You cannot hand a filesystem dump to a colleague, submit it as evidence, publish it alongside research, or store it in a shared environment without first removing the personal data.
 
-Existing forensic tools (iLEAPP, MVT, Magnet AXIOM, Cellebrite UFED, Autopsy) are built to **extract** personal data. HYGEIA does the opposite: selective, verified, forensic-grade removal.
+Existing forensic tools (iLEAPP, MVT, Magnet AXIOM, Cellebrite UFED, Autopsy) are built to **extract** personal data. HYGEIA does the opposite: selective, verified, forensic-grade removal across every platform those tools target.
 
 ---
 
@@ -30,7 +32,16 @@ PII can survive deletion through multiple mechanisms: SQLite WAL files, database
 
 ### Platform Intelligence
 
-20 schema-aware database handlers auto-detect platform from table structure (Chrome Login Data, Firefox places.sqlite, iOS Messages/Photos/Health/knowledgeC, Android contacts/SMS/calendar, Windows WebCache) and apply surgical sanitization — nuking known-PII tables while preserving schema. When a database isn't recognized, the generic scanner examines every TEXT column in every table for PII patterns. The detection layer is modular: all rules loaded from JSON configuration files that can be swapped for any platform.
+HYGEIA ships with 20 schema-aware database handlers, each tested in-house against real-world databases from that platform:
+
+- **Chrome/Chromium** (4 handlers): History, Login Data, Web Data/Autofill, Cookies — detected by table signature, not filename
+- **Firefox** (3 handlers): places.sqlite, formhistory.sqlite, cookies.sqlite — detected by `moz_*` table prefix
+- **iOS** (8 handlers): Messages, Photos.sqlite, Health, Contacts, Safari History/Bookmarks, Notes, knowledgeC, Screen Time, TCC.db
+- **Android** (3 handlers): contacts2.db, mmssms.db, calendar.db — detected by Android-specific table schemas
+- **Windows** (1 handler): WebCacheV01.dat (ESE-based, Containers/Entries structure)
+- **macOS**: TCC.db (permission grants), quarantine events, Spotlight indexes
+
+Auto-detection works by table signature — HYGEIA opens the database, reads the schema, and matches against known platform signatures. No reliance on filenames or directory structure. When a database isn't recognized, the generic scanner examines every TEXT column in every table for PII patterns. The detection layer is modular: all rules loaded from JSON configuration files.
 
 ### Compliance Alignment
 
@@ -131,4 +142,8 @@ The copy step (input to output) dominates wall-clock time for large dumps. Sanit
 
 HYGEIA operates as a standalone CLI tool or as a Python library. All sanitization modules expose functions that accept `Path` objects and return structured result dictionaries, making integration into larger pipelines straightforward.
 
-When paired with an intelligence database (such as ICARUS), HYGEIA can make analysis-informed decisions about which artifacts to preserve based on prior classification results.
+Typical integration points:
+- **CI/CD pipelines**: Run HYGEIA as a pre-publish step before sharing datasets or artifacts
+- **Forensic workflows**: Post-extraction sanitization after iLEAPP, MVT, or Cellebrite extraction
+- **Research automation**: Programmatic API for batch sanitization across multiple dumps
+- **Compliance auditing**: JSON manifest output feeds directly into audit documentation
