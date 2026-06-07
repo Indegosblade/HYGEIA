@@ -156,6 +156,103 @@ def test_public_user_ip_is_not_false_positive():
     assert _is_false_positive("data/cookies.db", "ip_v4", "93.184.216.34") is False
 
 
+# ── Residual false-positive fixes (fix/verification-residuals) ────────────────
+
+def test_manifest_files_skipped_by_scanner():
+    """manifest.json and MANIFEST.txt are HYGEIA output files — the scanner
+    must skip them to avoid the manifest self-reporting loop."""
+    import tempfile, shutil
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    # Write a manifest.json that contains phone numbers that were logged
+    (root / "manifest.json").write_text('{"phone": "1-604-419-2133", "found": true}')
+    (root / "MANIFEST.txt").write_text("phone=16044192133 found=1")
+    matches = scan_text_files(root)
+    assert len(matches) == 0, (
+        f"manifest files should be skipped, got {len(matches)} matches: "
+        + ", ".join(f"{m.path}:{m.pattern_name}" for m in matches)
+    )
+    shutil.rmtree(d)
+
+
+def test_bare_9digit_ssn_in_plist_is_false_positive():
+    """Bare 9-digit integers in .plist files (timestamps, config ints) must not
+    be flagged as SSNs — real SSNs in iOS are formatted with dashes."""
+    assert _is_false_positive("Preferences/cloud.quota.plist", "ssn", "777777789") is True
+    assert _is_false_positive("Preferences/facetime.bag.plist", "ssn", "201326586") is True
+    assert _is_false_positive("Preferences/routined.plist", "ssn", "013456789") is True
+    assert _is_false_positive("Preferences/tipsd.plist", "ssn", "012345678") is True
+
+
+def test_formatted_ssn_in_plist_is_not_false_positive():
+    """A properly formatted SSN (XXX-XX-XXXX) must still be flagged even in a .plist."""
+    assert _is_false_positive("Preferences/some.plist", "ssn", "123-45-6789") is False
+
+
+def test_bare_9digit_ssn_in_sqlite_is_false_positive():
+    """Bare 9-digit integers in SQLite databases (sequence numbers, CoreData)
+    are not SSNs."""
+    assert _is_false_positive("data/Calendar.sqlitedb", "ssn", "802498179") is True
+    assert _is_false_positive("data/Extras.db", "ssn", "803772792") is True
+
+
+def test_leading_zero_gps_is_false_positive():
+    """Values with a leading zero before the decimal (07.6100) are version
+    numbers, not GPS coordinates."""
+    assert _is_false_positive("data/some.plist", "gps_coord", "07.6100") is True
+    assert _is_false_positive("data/some.plist", "gps_coord", "00.1234") is True
+
+
+def test_4decimal_gps_in_plist_is_false_positive():
+    """Version-like floats with exactly 4 decimal places in a plist are not GPS."""
+    assert _is_false_positive("Preferences/tipsd.plist", "gps_coord", "11.5600") is True
+    assert _is_false_positive("Preferences/some.plist", "gps_coord", "22.0598") is True
+
+
+def test_real_gps_6decimal_not_false_positive():
+    """GPS coordinates with 6+ decimal places in non-plist files remain flagged."""
+    assert _is_false_positive("data/photos.db:ZASSET.ZLATITUDE", "gps_coord", "37.338200") is False
+
+
+def test_external_mod_tag_gps_is_false_positive():
+    """external_mod_tag column in SQLite databases is a sync tag, not GPS."""
+    assert _is_false_positive("data/Calendar.sqlitedb:Event.external_mod_tag", "gps_coord", "179.100725") is True
+
+
+def test_single_digit_octet_ip_is_false_positive():
+    """All-single-digit-octet IPs like 2.3.5.8 are version numbers, not user IPs."""
+    assert _is_false_positive("Preferences/SpeakSelection.plist", "ip_v4", "2.3.5.8") is True
+    assert _is_false_positive("data/config.json", "ip_v4", "1.2.3.4") is True
+
+
+def test_double_digit_octet_ip_not_false_positive():
+    """IPs with multi-digit octets in the public range must still be flagged."""
+    assert _is_false_positive("data/network.log", "ip_v4", "23.5.8.9") is False
+
+
+def test_repeated_digit_phone_is_false_positive():
+    """Phone numbers with 7+ repeated digits are Apple demo/placeholder data."""
+    assert _is_false_positive("Preferences/tipsd.plist", "phone_us", "3333333334") is True
+    assert _is_false_positive("Preferences/tipsd.plist", "phone_us", "5555555555") is True
+
+
+def test_real_phone_not_repeated_digits():
+    """A real phone number without repeated-digit pattern must still be flagged."""
+    assert _is_false_positive("data/contacts.db", "phone_us", "6044192133") is False
+
+
+def test_known_test_credit_cards_are_false_positives():
+    """Mastercard/Visa/Stripe test card numbers are demo data, not real PII."""
+    assert _is_false_positive("Preferences/tipsd.plist", "credit_card", "5555555555555556") is True
+    assert _is_false_positive("data/any.json", "credit_card", "4111111111111111") is True
+    assert _is_false_positive("data/any.json", "credit_card", "4242424242424242") is True
+
+
+def test_real_credit_card_not_false_positive():
+    """A credit card number that is not a known test card must still be flagged."""
+    assert _is_false_positive("data/wallet.db", "credit_card", "4532015112830366") is False
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = failed = 0
