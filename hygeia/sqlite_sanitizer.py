@@ -280,9 +280,12 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
                 continue
 
             text_cols = []
+            pk_cols = set()
             for col in columns:
                 col_name = col[1]
                 col_type = (col[2] or "").upper()
+                if col[5]:  # primary key flag
+                    pk_cols.add(col_name.lower())
                 if any(t in col_type for t in ("TEXT", "VARCHAR", "CHAR", "CLOB")) or col_type == "" or col_name.lower() in SENSITIVE_COLUMNS:
                     text_cols.append(col_name)
 
@@ -302,7 +305,22 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
                             result["rows_redacted"] += affected
                             pii_found.add(f"sensitive_column:{col_lower}")
                     except sqlite3.Error:
-                        pass
+                        # UNIQUE/PK constraint — use per-row unique values
+                        try:
+                            rows = cursor.execute(
+                                f"SELECT rowid FROM \"{table}\" "
+                                f"WHERE \"{col_name}\" IS NOT NULL AND \"{col_name}\" != ''"
+                            ).fetchall()
+                            for i, (rowid,) in enumerate(rows):
+                                cursor.execute(
+                                    f"UPDATE \"{table}\" SET \"{col_name}\" = ? WHERE rowid = ?",
+                                    (f"[REDACTED_{i}]", rowid),
+                                )
+                            if rows:
+                                result["rows_redacted"] += len(rows)
+                                pii_found.add(f"sensitive_column:{col_lower}")
+                        except sqlite3.Error:
+                            pass
                     continue
 
                 # Regex scan other text columns for PII patterns
