@@ -23,6 +23,8 @@ from .sqlite_sanitizer import (
 )
 from .plist_sanitizer import sanitize_plist
 from .exif_stripper import strip_exif_directory, find_exiftool
+from .pdf_stripper import strip_pdf_directory
+from .office_stripper import strip_office_directory
 from .text_sanitizer import sanitize_all_text_files
 from .filesystem_sanitizer import sanitize_filesystem
 from .compliance import get_compliance_profile, generate_compliance_report
@@ -307,17 +309,29 @@ def main():
             print(f"  Timestamps normalized: {ts_action.get('files_normalized', 0)} files")
     print()
 
-    # [5/7] EXIF
+    # [5/7] EXIF + PDF + Office metadata
     if not args.skip_exif and not args.dry_run:
-        print("[5/7] Stripping EXIF metadata...")
+        print("[5/7] Stripping image EXIF metadata...")
         exif_result = strip_exif_directory(work_path)
         all_actions.append(exif_result)
         if exif_result.get("skipped"):
             print("  WARNING: exiftool not found — EXIF metadata was NOT stripped")
         else:
             print(f"  Images processed: {exif_result.get('files_stripped', 0)}")
+
+        print("      Stripping PDF metadata...")
+        pdf_result = strip_pdf_directory(work_path)
+        all_actions.append(pdf_result)
+        print(f"  PDFs processed: {pdf_result.get('files_processed', 0)}, "
+              f"modified: {pdf_result.get('files_modified', 0)}")
+
+        print("      Stripping Office document metadata...")
+        office_result = strip_office_directory(work_path)
+        all_actions.append(office_result)
+        print(f"  Office docs processed: {office_result.get('files_processed', 0)}, "
+              f"modified: {office_result.get('files_modified', 0)}")
     else:
-        print("[5/7] EXIF stripping: skipped")
+        print("[5/7] EXIF/PDF/Office stripping: skipped")
     print()
 
     # [5b/7] Forensic hardening
