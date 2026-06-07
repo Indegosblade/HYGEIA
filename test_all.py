@@ -1,9 +1,7 @@
 """Full pipeline test for HYGEIA."""
 import sys
-import os
 import re
 import tempfile
-import shutil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -27,17 +25,17 @@ def test(name, fn):
 print("=== Test 1: Imports ===")
 
 def t_imports():
-    from hygeia import __version__
-    from hygeia.scanner import FileScanner, FileAction, ScanResult
-    from hygeia.sqlite_sanitizer import (
+    from hygeia import __version__  # noqa: F401
+    from hygeia.scanner import FileScanner, FileAction, ScanResult  # noqa: F401
+    from hygeia.sqlite_sanitizer import (  # noqa: F401
         delete_database, sanitize_database, sanitize_knowledgec,
         sanitize_photos_sqlite, delete_wal_orphans, find_all_databases,
     )
-    from hygeia.plist_sanitizer import sanitize_plist
-    from hygeia.exif_stripper import strip_exif_directory, exiftool_available
-    from hygeia.verifier import verify_sanitization
-    from hygeia.manifest import generate_manifest
-    assert __version__ == "1.0.0"
+    from hygeia.plist_sanitizer import sanitize_plist  # noqa: F401
+    from hygeia.exif_stripper import strip_exif_directory, exiftool_available  # noqa: F401
+    from hygeia.verifier import verify_sanitization  # noqa: F401
+    from hygeia.manifest import generate_manifest  # noqa: F401
+    assert __version__ == "2.0.0"
 
 test("all imports", t_imports)
 
@@ -93,7 +91,6 @@ def t_cli_help():
 test("CLI --help", t_cli_help)
 
 def t_cli_no_optimize():
-    import argparse
     old_argv = sys.argv
     sys.argv = ["hygeia_cli.py", "--input", "/tmp/fake", "--output", "/tmp/fake2", "--optimize"]
     try:
@@ -145,7 +142,7 @@ def t_dry_run():
         try:
             from hygeia_cli import main
             main()
-        except SystemExit as e:
+        except SystemExit:
             pass
         finally:
             sys.argv = old_argv
@@ -199,7 +196,7 @@ def t_sqlite_delete():
         conn.commit()
         conn.close()
 
-        result = delete_database(db_path)
+        delete_database(db_path)
         assert not db_path.exists(), "Database should be deleted"
     finally:
         try:

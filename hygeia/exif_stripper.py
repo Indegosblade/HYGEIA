@@ -2,8 +2,8 @@
 HYGEIA EXIF Stripper -- bulk image metadata removal.
 
 Uses exiftool to strip all EXIF metadata from images (9 formats).
-Removes GPS coordinates, device make/model, timestamps, and all
-other embedded tags.
+Removes GPS coordinates, device make/model, timestamps, camera serial
+numbers, owner names, and all other embedded tags.
 """
 
 import os
@@ -120,7 +120,12 @@ def strip_single_file(filepath: Path) -> bool:
 
 
 def verify_exif_stripped(path: Path) -> list[Path]:
-    """Verify no images have GPS or PII EXIF tags remaining."""
+    """
+    Verify no images have GPS, PII, or device-identifying EXIF tags remaining.
+
+    Checks for: GPS tags, Make, Model, SerialNumber, LensSerialNumber,
+    ImageUniqueID, OwnerName, CameraOwnerName, Copyright.
+    """
     files_with_exif = []
 
     exiftool_path = find_exiftool()
@@ -133,7 +138,15 @@ def verify_exif_stripped(path: Path) -> list[Path]:
             continue
         try:
             proc = subprocess.run(
-                [exiftool_path, "-gps*", "-Make", "-Model", "-q", "-s3", str(f)],
+                [
+                    exiftool_path,
+                    "-gps*",
+                    "-Make", "-Model",
+                    "-SerialNumber", "-LensSerialNumber",
+                    "-ImageUniqueID", "-OwnerName", "-CameraOwnerName",
+                    "-Copyright",
+                    "-q", "-s3", str(f),
+                ],
                 capture_output=True, text=True, timeout=10
             )
             if proc.stdout.strip():

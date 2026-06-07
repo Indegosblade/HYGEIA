@@ -17,10 +17,6 @@ from hygeia.sqlite_sanitizer import sanitize_database_generic
 from hygeia.compliance import (
     get_compliance_profile,
     generate_compliance_report,
-    HIPAA_ADDITIONAL_COLUMNS,
-    GDPR_SPECIAL_CATEGORY_COLUMNS,
-    CCPA_ADDITIONAL_TABLES,
-    CCPA_ADDITIONAL_COLUMNS,
 )
 
 
