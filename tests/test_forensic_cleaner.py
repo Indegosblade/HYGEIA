@@ -17,6 +17,7 @@ from hygeia.forensic_cleaner import (
     clean_swap_temp_files,
     normalize_timestamps,
     forensic_clean_all,
+    _is_leveldb_dir,
 )
 
 
@@ -144,6 +145,137 @@ class TestCleanLeveldbStores:
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+
+class TestLeveldbBroadDetection:
+    """Tests for broadened LevelDB detection: name-pattern + CURRENT-only heuristics."""
+
+    def test_localstorageunderscorelevelddb_with_ldb_detected(self):
+        """LocalStorage_leveldb dir with CURRENT + .ldb is detected and deleted.
+
+        Regression for apps/chatgpt/LocalStorage_leveldb miss: directory name
+        ends with _leveldb so it must be detected regardless of CURRENT presence.
+        """
+        d = _make_tmp()
+        try:
+            store = _mkdir(d, "apps", "chatgpt", "LocalStorage_leveldb")
+            _touch(store / "CURRENT", b"1")
+            _touch(store / "000003.ldb", b"data")
+            actions = clean_leveldb_stores(d)
+            assert not store.exists(), "LocalStorage_leveldb should be removed"
+            assert len(actions) == 1
+            assert actions[0]["action"] == "delete_leveldb_store"
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_localstorageunderscorelevelddb_log_only_detected(self):
+        """LocalStorage_leveldb dir with CURRENT + .log files only is detected.
+
+        This is the exact scenario from the real-world failure: 55 PII residuals
+        in apps/chatgpt/LocalStorage_leveldb/010706.log. The dir has no .ldb
+        files, only .log files. Name-pattern detection must catch it.
+        """
+        d = _make_tmp()
+        try:
+            store = _mkdir(d, "apps", "chatgpt", "LocalStorage_leveldb")
+            _touch(store / "CURRENT", b"1")
+            _touch(store / "010706.log", b"pii data")
+            _touch(store / "010707.log", b"more pii")
+            actions = clean_leveldb_stores(d)
+            assert not store.exists(), "LocalStorage_leveldb should be removed"
+            assert len(actions) == 1
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_foo_dot_leveldb_inside_indexeddb_detected(self):
+        """foo.leveldb inside IndexedDB/ is detected and deleted."""
+        d = _make_tmp()
+        try:
+            store = _mkdir(d, "IndexedDB", "https_example.com_0.indexeddb.leveldb")
+            _touch(store / "CURRENT", b"1")
+            _touch(store / "000001.ldb", b"data")
+            actions = clean_leveldb_stores(d)
+            assert not store.exists(), "IndexedDB/*.leveldb should be removed"
+            assert len(actions) == 1
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_leveldb_name_suffix_no_current_file_detected(self):
+        """Directory ending in 'leveldb' is detected even without a CURRENT file.
+
+        Electron apps sometimes write LevelDB stores without a CURRENT file
+        during active use. Name pattern alone must trigger detection.
+        """
+        d = _make_tmp()
+        try:
+            store = _mkdir(d, "LocalStorage_leveldb")
+            _touch(store / "000001.ldb", b"data")
+            # No CURRENT file intentionally
+            actions = clean_leveldb_stores(d)
+            assert not store.exists(), "Name-pattern detection must work without CURRENT"
+            assert len(actions) == 1
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_log_only_no_current_no_leveldb_name_not_detected(self):
+        """Dir with only .log files and no CURRENT, no leveldb name is NOT detected.
+
+        A plain logs/ directory must not be misidentified as LevelDB.
+        """
+        d = _make_tmp()
+        try:
+            plain_logs = _mkdir(d, "logs")
+            _touch(plain_logs / "app.log", b"ordinary log")
+            _touch(plain_logs / "error.log", b"error")
+            actions = clean_leveldb_stores(d)
+            assert plain_logs.exists(), "Plain logs/ dir must NOT be deleted"
+            assert len(actions) == 0
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_is_leveldb_dir_name_suffix_match(self):
+        """_is_leveldb_dir returns True for a dir whose name ends in leveldb."""
+        d = _make_tmp()
+        try:
+            store = _mkdir(d, "SomeApp_leveldb")
+            _touch(store / "data.ldb", b"x")
+            assert _is_leveldb_dir(store) is True
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_is_leveldb_dir_current_plus_log_only(self):
+        """_is_leveldb_dir returns True for CURRENT + .log (no .ldb)."""
+        d = _make_tmp()
+        try:
+            store = _mkdir(d, "db")
+            _touch(store / "CURRENT", b"1")
+            _touch(store / "000001.log", b"leveldb journal")
+            assert _is_leveldb_dir(store) is True
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_is_leveldb_dir_current_only_false(self):
+        """_is_leveldb_dir returns False for a dir with only a CURRENT file and no name match."""
+        d = _make_tmp()
+        try:
+            store = _mkdir(d, "notdb")
+            _touch(store / "CURRENT", b"1")
+            assert _is_leveldb_dir(store) is False
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_dry_run_leveldb_name_pattern(self):
+        """dry_run=True on a name-pattern-matched store reports but does not delete."""
+        d = _make_tmp()
+        try:
+            store = _mkdir(d, "SomeApp_leveldb")
+            _touch(store / "CURRENT", b"1")
+            _touch(store / "000001.ldb", b"data")
+            actions = clean_leveldb_stores(d, dry_run=True)
+            assert store.exists(), "dry_run must not delete"
+            assert len(actions) == 1
+            assert actions[0]["dry_run"] is True
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

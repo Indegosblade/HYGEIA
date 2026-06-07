@@ -27,12 +27,13 @@ def _sha256(filepath: Path) -> str:
 
 # LevelDB
 
+# Directory name suffixes that unambiguously identify a LevelDB store,
+# even when no CURRENT file is present (e.g. mid-write Electron apps).
+_LEVELDB_NAME_SUFFIXES = ("leveldb", "_leveldb")
 
-def _is_leveldb_dir(path):
-    if not path.is_dir():
-        return False
-    if not (path / "CURRENT").is_file():
-        return False
+
+def _has_leveldb_data_files(path):
+    """Return True if path contains at least one LevelDB data file."""
     return (
         any(path.glob("*.ldb"))
         or any(path.glob("*.sst"))
@@ -41,12 +42,79 @@ def _is_leveldb_dir(path):
     )
 
 
+def _is_leveldb_dir(path):
+    """Return True if path looks like a LevelDB store directory.
+
+    Detection criteria (any one is sufficient):
+    1. Contains a CURRENT file AND at least one data file (*.ldb, *.sst,
+       MANIFEST-*, *.log) — the classic LevelDB layout.
+    2. Directory name ends with "leveldb" or "_leveldb" — covers
+       Electron ``LocalStorage_leveldb``, ``IndexedDB/foo.leveldb``, etc.
+    3. Path contains an ``IndexedDB`` component and the directory name
+       ends with ``.leveldb`` — belt-and-suspenders for Chrome/Electron.
+    """
+    if not path.is_dir():
+        return False
+
+    name_lower = path.name.lower()
+
+    # Criterion 2: name-based detection (case-insensitive suffix match)
+    for suffix in _LEVELDB_NAME_SUFFIXES:
+        if name_lower.endswith(suffix):
+            return True
+
+    # Criterion 3: inside IndexedDB and name ends with .leveldb
+    parts_lower = [p.lower() for p in path.parts]
+    if "indexeddb" in parts_lower and name_lower.endswith(".leveldb"):
+        return True
+
+    # Criterion 1: CURRENT file + at least one data file
+    if (path / "CURRENT").is_file() and _has_leveldb_data_files(path):
+        return True
+
+    return False
+
+
+def _collect_leveldb_dirs(dump_path):
+    """Walk dump_path and return all LevelDB store directories.
+
+    Uses two complementary strategies:
+    - CURRENT-file walk: fast for classic layouts.
+    - Name-pattern walk: catches stores without a CURRENT file.
+
+    Deduplicates so a directory matched by both is only returned once.
+    Skips directories that are already inside a previously found store.
+    """
+    found = []
+    seen = set()
+
+    def _add(store_dir):
+        key = store_dir.resolve()
+        if key in seen:
+            return
+        # Skip if already inside a store we found (e.g. nested LevelDB)
+        for existing in found:
+            try:
+                store_dir.relative_to(existing)
+                return  # store_dir is inside an already-queued store
+            except ValueError:
+                pass
+        seen.add(key)
+        found.append(store_dir)
+
+    # Strategy A: walk every directory, check name patterns and CURRENT
+    for dirpath in dump_path.rglob("*"):
+        if not dirpath.is_dir():
+            continue
+        if _is_leveldb_dir(dirpath):
+            _add(dirpath)
+
+    return found
+
+
 def clean_leveldb_stores(dump_path, dry_run=False):
     actions = []
-    for current_file in list(dump_path.rglob("CURRENT")):
-        store_dir = current_file.parent
-        if not _is_leveldb_dir(store_dir):
-            continue
+    for store_dir in _collect_leveldb_dirs(dump_path):
         rel = str(store_dir.relative_to(dump_path))
         if dry_run:
             actions.append({"action": "delete_leveldb_store", "path": rel, "dry_run": True})
