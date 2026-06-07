@@ -75,7 +75,7 @@ class FileScanner:
     def _load_rules(self, filename: str) -> dict:
         path = self.rules_dir / filename
         if path.exists():
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 return json.load(f)
         log.warning(f"Rules file not found: {path}")
         return {}
