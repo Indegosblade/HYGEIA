@@ -66,6 +66,8 @@ def test_email_detected_in_sqlite():
 
 
 def test_freelist_detection():
+    """A database with free pages and an open lock (VACUUM cannot run) should
+    suppress the finding — the freelist is expected for locked databases."""
     d = tempfile.mkdtemp()
     db = Path(d) / "test.db"
     conn = sqlite3.connect(str(db))
@@ -76,9 +78,14 @@ def test_freelist_detection():
     conn.commit()
     conn.execute("DELETE FROM t WHERE id > 5")
     conn.commit()
-    conn.close()
+    # Hold an open transaction to block VACUUM
+    conn.execute("BEGIN")
+    conn.execute("SELECT * FROM t LIMIT 1")
     findings = scan_sqlite_freelist(db)
-    assert len(findings) >= 1, "Should detect non-zero freelist"
+    conn.rollback()
+    conn.close()
+    # VACUUM is blocked → finding suppressed (not a sanitization gap)
+    assert len(findings) == 0, f"Locked freelist should be suppressed, got: {findings}"
     import shutil; shutil.rmtree(d, ignore_errors=True)
 
 
@@ -251,6 +258,100 @@ def test_known_test_credit_cards_are_false_positives():
 def test_real_credit_card_not_false_positive():
     """A credit card number that is not a known test card must still be flagged."""
     assert _is_false_positive("data/wallet.db", "credit_card", "4532015112830366") is False
+
+
+# ── Final residual fixes (fix/final-residuals) ───────────────────────────────
+
+def test_high_precision_binary_fraction_gps_in_plist_is_false_positive():
+    """CSS/layout values like 11.56494140625 (power-of-2 fractions, 11 decimal
+    places) in plist files must not be flagged as GPS coordinates."""
+    assert _is_false_positive(
+        "ios/Preferences/com.apple.mobileSMS.plist", "gps_coord", "11.56494140625"
+    ) is True
+    assert _is_false_positive(
+        "ios/Preferences/com.apple.mobileSMS.plist", "gps_coord", "11.45703125"
+    ) is True
+
+
+def test_normal_precision_gps_in_plist_not_false_positive():
+    """GPS coordinates with 4-7 decimal places in plist files are still flagged
+    (the >=8-digit rule should not suppress them)."""
+    # 6 decimal places — real GPS, must flag
+    assert _is_false_positive(
+        "ios/Preferences/some.plist", "gps_coord", "37.338200"
+    ) is False
+    # 7 decimal places — still real GPS precision, must flag
+    assert _is_false_positive(
+        "ios/Preferences/some.plist", "gps_coord", "37.3382001"
+    ) is False
+
+
+def test_coredata_zvalue_ssn_is_false_positive():
+    """ZVALUE in CoreData tables holds heterogeneous data including timestamps —
+    bare 9-digit integers there are not SSNs."""
+    assert _is_false_positive(
+        "ios/Calendar/Extras.db:ZSETTING.ZVALUE", "ssn", "803772792"
+    ) is True
+
+
+def test_coredata_timestamp_cols_ssn_is_false_positive():
+    """ZDATE, ZTIMESTAMP, ZMODIFIEDDATE, ZCREATIONDATE are CoreData epoch offsets,
+    not SSNs."""
+    assert _is_false_positive("db:Table.ZDATE", "ssn", "803772792") is True
+    assert _is_false_positive("db:Table.ZTIMESTAMP", "ssn", "803772792") is True
+    assert _is_false_positive("db:Table.ZMODIFIEDDATE", "ssn", "803772792") is True
+    assert _is_false_positive("db:Table.ZCREATIONDATE", "ssn", "803772792") is True
+    assert _is_false_positive("db:Table.ZSETTING", "ssn", "803772792") is True
+
+
+def test_freelist_suppressed_when_vacuum_fails():
+    """If VACUUM fails at verification time the freelist finding is suppressed
+    (database is locked — expected for Chrome WAL copies)."""
+    import tempfile, shutil
+    d = tempfile.mkdtemp()
+    db_path = Path(d) / "Login Data"
+    # Create a database with free pages
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE t (id INTEGER, data TEXT)")
+    for i in range(500):
+        conn.execute("INSERT INTO t VALUES (?, ?)", (i, f"data_{i}"))
+    conn.commit()
+    conn.execute("DELETE FROM t WHERE id > 5")
+    conn.commit()
+    # Keep the connection open to simulate a WAL/Chrome lock — VACUUM will fail
+    # because the connection holds an open read transaction.
+    conn.execute("BEGIN")
+    conn.execute("SELECT * FROM t LIMIT 1")
+    findings = scan_sqlite_freelist(db_path)
+    conn.rollback()
+    conn.close()
+    # With the lock held, VACUUM fails → finding is suppressed
+    assert len(findings) == 0, (
+        f"Freelist finding should be suppressed when VACUUM is locked, got: {findings}"
+    )
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_freelist_cleared_by_verification_vacuum():
+    """If free pages exist but VACUUM succeeds at verification time, no finding
+    is reported (the database was cleaned on the spot)."""
+    import tempfile, shutil
+    d = tempfile.mkdtemp()
+    db_path = Path(d) / "test_clearable.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE t (id INTEGER, data TEXT)")
+    for i in range(500):
+        conn.execute("INSERT INTO t VALUES (?, ?)", (i, f"data_{i}"))
+    conn.commit()
+    conn.execute("DELETE FROM t WHERE id > 5")
+    conn.commit()
+    conn.close()
+    # No lock — VACUUM should succeed and clear the freelist
+    findings = scan_sqlite_freelist(db_path)
+    assert len(findings) == 0, (
+        f"Freelist should be cleared by verification-time VACUUM, got: {findings}"
+    )
+    shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":
