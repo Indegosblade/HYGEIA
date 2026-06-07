@@ -39,6 +39,16 @@ PII_PATTERNS = {
     "eth_wallet": re.compile(r'\b0x[0-9a-fA-F]{40}\b'),
     # URL with embedded credentials
     "url_creds": re.compile(r'\b(?:https?|ftp)://[^:@\s]+:[^@\s]+@[^\s]+'),
+    # Financial identifiers
+    "sin_tfn": re.compile(r'\b\d{3}[-\s]\d{3}[-\s]\d{3}\b'),
+    "swift_bic": re.compile(r'\b[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b'),
+    "us_routing": re.compile(r'\b(?:0[1-9]|[12]\d|3[0-2])[0-9]{7}\b'),
+    # Device identifiers
+    "imei": re.compile(r'\b\d{2}[-\s]?\d{6}[-\s]?\d{6}[-\s]?\d\b'),
+    "imsi": re.compile(r'\b\d{3}\d{2,3}\d{9,10}\b'),
+    # Healthcare/regulatory
+    "dea_number": re.compile(r'\b[ABCDEFGHJKLMNPRSTUXabcdefghjklmnprstux][A-Za-z9]\d{7}\b'),
+    "npi": re.compile(r'\b(?:80840)?[12]\d{9}\b'),
 }
 
 SENSITIVE_JSON_KEYS = {
@@ -60,7 +70,9 @@ SENSITIVE_JSON_KEYS = {
     # Financial
     "ssn", "social_security", "date_of_birth", "dob", "birthdate", "birthday",
     "card_number", "card_holder", "cardholder", "cvv", "expiry",
-    "routing_number", "bank_account", "account_number",
+    "routing_number", "routing", "bank_account", "account_number",
+    "swift", "bic", "swift_code", "bic_code",
+    "sin", "tfn",
     "salary", "income", "wage",
     # Government ID
     "passport", "passport_number", "drivers_license", "license_number",
