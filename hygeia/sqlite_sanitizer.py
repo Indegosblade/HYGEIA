@@ -198,33 +198,6 @@ def sanitize_database(db_path: Path, sql_commands: list[str]) -> dict:
     return result
 
 
-def sanitize_knowledgec(db_path: Path) -> dict:
-    """
-    Column-level sanitization for knowledgeC.db.
-    Preserves com.apple.* system app data, redacts third-party app names
-    and browsing/Siri streams.
-    """
-    return sanitize_database(db_path, [
-        "UPDATE ZOBJECT SET ZVALUESTRING = '[REDACTED]' WHERE ZVALUESTRING NOT LIKE 'com.apple.%' AND ZVALUESTRING IS NOT NULL",
-        "DELETE FROM ZOBJECT WHERE ZSTREAMNAME LIKE '%safari%'",
-        "DELETE FROM ZOBJECT WHERE ZSTREAMNAME LIKE '%siri%'",
-        "DELETE FROM ZOBJECT WHERE ZSTREAMNAME LIKE '%messaging%'",
-    ])
-
-
-def sanitize_photos_sqlite(db_path: Path) -> dict:
-    """
-    Selective sanitization for Photos.sqlite.
-    NULLs GPS coordinates, deletes facial recognition data.
-    Preserves schema and non-geographic metadata.
-    """
-    return sanitize_database(db_path, [
-        "UPDATE ZASSET SET ZLATITUDE = NULL, ZLONGITUDE = NULL WHERE ZLATITUDE IS NOT NULL",
-        "DELETE FROM ZPERSON",
-        "DELETE FROM ZDETECTEDFACE",
-        "DELETE FROM ZDETECTEDFACEPRINT",
-    ])
-
 
 def find_all_databases(dump_path: Path) -> list[Path]:
     """Find all SQLite databases in a dump, including by magic bytes."""
