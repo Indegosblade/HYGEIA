@@ -149,7 +149,6 @@ class FileScanner:
         return info
 
     def classify_file(self, rel_path: str, dump_path: Path, jailbreak: JailbreakInfo) -> FileClassification:
-        """Classify a single file path."""
         full_path = dump_path / rel_path
         try:
             size = full_path.stat().st_size if full_path.exists() and not full_path.is_symlink() else 0
@@ -215,7 +214,6 @@ class FileScanner:
         return FileClassification(rel_path, FileAction.PRESERVE, "unclassified (default preserve)", size)
 
     def scan_dump(self, dump_path: Path) -> ScanResult:
-        """Full dump scan — classify every file."""
         result = ScanResult()
         result.jailbreak = self.detect_jailbreak(dump_path)
 
