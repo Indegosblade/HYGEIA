@@ -19,8 +19,8 @@ from .scanner import FileScanner, FileAction, ScanResult
 from .sqlite_sanitizer import (
     delete_database, sanitize_knowledgec,
     sanitize_photos_sqlite, delete_wal_orphans, find_all_databases,
-    sanitize_database_generic,
 )
+from .platform_handlers import sanitize_with_platform_detection
 from .plist_sanitizer import sanitize_plist
 from .exif_stripper import strip_exif_directory, find_exiftool
 from .pdf_stripper import strip_pdf_directory
@@ -117,7 +117,10 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
                 elif full_path.exists():
                     actions.append(sanitize_plist(full_path))
 
-    # Generic database scan — runs on ALL databases regardless of platform
+    # Platform-detected + generic database scan -- runs on ALL databases.
+    # sanitize_with_platform_detection auto-detects schema, runs a surgical
+    # platform handler if recognised, then falls back to the generic scanner
+    # as a residual sweep.  Unrecognised databases get only the generic scan.
     databases = find_all_databases(work_path)
     extra_cols = compliance.extra_sensitive_columns if compliance else None
     extra_tbls = compliance.extra_pii_tables if compliance else None
@@ -132,7 +135,7 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
         futures_map = {}
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for idx, db in enumerate(databases):
-                future = executor.submit(sanitize_database_generic, db,
+                future = executor.submit(sanitize_with_platform_detection, db,
                                          extra_cols, extra_tbls)
                 futures_map[future] = idx
             completed = 0
@@ -142,18 +145,23 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
                 result = future.result()
                 db_results[idx] = result
                 log.info(f"Sanitizing database {completed}/{total_dbs}: {databases[idx].name}")
-                if result.get("rows_redacted", 0) > 0:
-                    print(f"    {databases[idx].name}: {result['rows_redacted']} rows redacted "
+                rows = result.get("rows_deleted", 0) + result.get("rows_redacted", 0)
+                if rows > 0:
+                    platform = result.get("platform", "generic")
+                    print(f"    {databases[idx].name} [{platform}]: {rows} rows sanitized "
                           f"({', '.join(result.get('pii_types_found', []))})")
         actions.extend(db_results)
     else:
         # Sequential database sanitization
         for i, db in enumerate(databases):
             log.info(f"Sanitizing database {i + 1}/{total_dbs}: {db.name}")
-            result = sanitize_database_generic(db, extra_columns=extra_cols, extra_tables=extra_tbls)
+            result = sanitize_with_platform_detection(db, extra_cols, extra_tbls)
             actions.append(result)
-            if result.get("rows_redacted", 0) > 0:
-                print(f"    {db.name}: {result['rows_redacted']} rows redacted ({', '.join(result.get('pii_types_found', []))})")
+            rows = result.get("rows_deleted", 0) + result.get("rows_redacted", 0)
+            if rows > 0:
+                platform = result.get("platform", "generic")
+                print(f"    {db.name} [{platform}]: {rows} rows sanitized "
+                      f"({', '.join(result.get('pii_types_found', []))})")
 
     if not dry_run:
         orphans = delete_wal_orphans(work_path)
