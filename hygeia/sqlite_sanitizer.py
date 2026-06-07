@@ -11,7 +11,6 @@ import time
 import logging
 from pathlib import Path
 
-from .exceptions import DatabaseLockError, DatabaseCorruptionError
 from .utils import sha256 as _sha256
 
 log = logging.getLogger("hygeia.sqlite")
