@@ -28,9 +28,9 @@ Sanitization preserves the structural and system-level data that makes artifacts
 
 PII can survive deletion through multiple mechanisms: SQLite WAL files, database free pages, FTS shadow tables, LevelDB logs, thumbnail caches, swap files, search indexes, and file timestamps. HYGEIA addresses each layer independently. A single missed vector means the data is recoverable. The pipeline assumes every vector is active and handles all of them.
 
-### Platform Independence
+### Platform Intelligence
 
-The core engine operates on data formats (SQLite, JSON, CSV, binary plists, images), not platform assumptions. iOS-specific rules are loaded from JSON configuration files that can be replaced or extended for any platform. The generic mode requires zero platform knowledge — it scans every TEXT column in every SQLite table for PII patterns.
+20 schema-aware database handlers auto-detect platform from table structure (Chrome Login Data, Firefox places.sqlite, iOS Messages/Photos/Health/knowledgeC, Android contacts/SMS/calendar, Windows WebCache) and apply surgical sanitization — nuking known-PII tables while preserving schema. When a database isn't recognized, the generic scanner examines every TEXT column in every table for PII patterns. The detection layer is modular: all rules loaded from JSON configuration files that can be swapped for any platform.
 
 ### Compliance Alignment
 
@@ -59,11 +59,11 @@ No other sanitization tool implements this complete pipeline.
 
 PII detection operates at three levels simultaneously:
 
-**Regex patterns**: 10 pattern families (email, phone US/intl, SSN, credit card, IPv4, IPv6, IBAN, MAC) applied to every TEXT column in every SQLite table and every line of every text file. Patterns are tuned to minimize false positives — SSN excludes known-invalid prefixes, IP excludes localhost/broadcast, phone requires area code validation.
+**Regex patterns**: 40+ patterns across 7 categories (identity, location, financial, credentials, crypto, healthcare, vehicle) applied to every TEXT column in every SQLite table and every line of every text file. All patterns defined in a single JSON source of truth (`hygeia/rules/pii_patterns.json`) and selectable individually or by category. Context-dependent patterns (short digit sequences like passport numbers, routing numbers) require nearby keywords within a configurable window to fire, preventing false positives. Multi-pass scanning catches nested PII (URLs embedding emails, etc.) — runs until no new detections found.
 
-**Column-name detection**: 50+ column names (email, username, password, phone, address, latitude, longitude, api_key, token, cookie, etc.) trigger blanket redaction regardless of content. This catches PII that doesn't match any regex pattern — a name in a `first_name` column, a street address in an `address` column.
+**Column-name detection**: 60+ column names (email, username, password, phone, address, latitude, longitude, api_key, token, cookie, ssn, credit_card, etc.) trigger blanket redaction regardless of content. This catches PII that doesn't match any regex pattern — a name in a `first_name` column, a street address in an `address` column.
 
-**Table-level rules**: 30+ table names across Chrome, Firefox, Android, messaging apps, and macOS are recognized as entirely PII. All rows are deleted, schema is preserved. This is faster and more thorough than row-level scanning for tables that are definitionally personal data.
+**Table-level rules**: 80+ table names across Chrome, Firefox, Android, iOS, messaging apps, Windows, and macOS are recognized as entirely PII. All rows are deleted, schema is preserved. This is faster and more thorough than row-level scanning for tables that are definitionally personal data.
 
 ### Forensic Artifact Handling
 
