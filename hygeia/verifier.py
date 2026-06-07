@@ -9,6 +9,7 @@ tag verification for residual image metadata.
 import re
 import sqlite3
 import logging
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from . import sqlite_sanitizer, exif_stripper
 log = logging.getLogger("hygeia.verifier")
 
 PII_PATTERNS = {
+    # ── Original 13 patterns ──────────────────────────────────────────────────
     "email": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
     "phone_us": re.compile(r'\b(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b'),
     "phone_intl": re.compile(r'\+(?:44|49|33|91|81|61|86|55|7|34|39|82|31|46|47|48|90)\s?\d[\d\s\-]{6,14}\d\b'),
@@ -30,6 +32,126 @@ PII_PATTERNS = {
     "device_name": re.compile(r"\b\w+'s\s+(?:iPhone|iPad|iPod|Mac|Apple Watch)\b", re.IGNORECASE),
     "iban": re.compile(r'\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b'),
     "mac_addr": re.compile(r'\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b'),
+
+    # ── Identity documents ────────────────────────────────────────────────────
+    # UK National Insurance Number: two letters + 6 digits + A-D suffix
+    "uk_nin": re.compile(
+        r'\b[A-CEGHJ-PR-TW-Z]{2}\d{6}[A-D]\b', re.IGNORECASE
+    ),
+    # Indian PAN card: 5 letters, 4 digits, 1 letter (e.g. ABCDE1234F)
+    "indian_pan": re.compile(r'\b[A-Z]{5}\d{4}[A-Z]\b'),
+    # Indian Aadhaar: 4-4-4 digit groups (with space or hyphen)
+    "indian_aadhaar": re.compile(r'\b\d{4}[-\s]\d{4}[-\s]\d{4}\b'),
+    # DEA number: 2 letters + 7 digits (e.g. AB1234563)
+    "dea_number": re.compile(r'\b[A-Z]{2}\d{7}\b'),
+    # Medicare Beneficiary Identifier (MBI): 1digit-1UC-1UC/digit-1digit-1UC-1UC/digit-1digit-2UC-2digits
+    "medicare_mbi": re.compile(
+        r'\b\d[A-Z][A-Z0-9]\d[A-Z][A-Z0-9]\d[A-Z]{2}\d{2}\b'
+    ),
+    # Vehicle Identification Number: 17 chars, no I/O/Q
+    "vin": re.compile(r'\b[A-HJ-NPR-Z0-9]{17}\b'),
+
+    # ── Financial / banking ───────────────────────────────────────────────────
+    # US EIN (Employer Identification Number): XX-XXXXXXX
+    "us_ein": re.compile(r'\b\d{2}-\d{7}\b'),
+    # SWIFT / BIC code: 6 alpha + 2 alphanumeric + optional 3 alphanumeric
+    "swift_bic": re.compile(r'\b[A-Z]{6}[A-Z0-9]{2}(?:[A-Z0-9]{3})?\b'),
+    # Bitcoin address: Legacy P2PKH/P2SH (base58) or bech32
+    "bitcoin_address": re.compile(
+        r'\b(?:[13][a-km-zA-HJ-NP-Z1-9]{25,34}|bc1[a-zA-HJ-NP-Z0-9]{25,90})\b'
+    ),
+    # Ethereum address: 0x + 40 hex chars
+    "ethereum_address": re.compile(r'\b0x[0-9a-fA-F]{40}\b'),
+
+    # ── Credential / secret patterns ─────────────────────────────────────────
+    # JWT token: three base64url segments separated by dots
+    "jwt_token": re.compile(
+        r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+    ),
+    # AWS access key ID: starts AKIA + 16 uppercase alphanumeric
+    "aws_access_key": re.compile(r'\bAKIA[0-9A-Z]{16}\b'),
+    # GitHub personal access tokens and OAuth tokens
+    "github_token": re.compile(
+        r'\b(?:ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{36,255}\b'
+    ),
+    # Generic Stripe-style API key: sk/pk + live/test/prod + 20+ chars
+    "generic_api_key": re.compile(
+        r'\b(?:sk|pk)[-_](?:live|test|prod)[-_][A-Za-z0-9]{20,}\b'
+    ),
+    # Slack tokens: xoxb/xoxp/xoxr/xoxa/xoxs prefix
+    "slack_token": re.compile(r'\bxox[bpras]-[0-9a-zA-Z-]{10,}\b'),
+}
+
+# Context-dependent patterns: require nearby keyword(s) within a window of
+# characters. Each entry: (compiled_regex, set_of_keyword_strings, window_size)
+# Keywords are matched case-insensitively anywhere within `window` chars of
+# the regex match start/end.
+CONTEXT_PATTERNS: dict[str, tuple] = {
+    # US Passport: letter + 9 digits OR plain 9 digits, near "passport"
+    "us_passport": (
+        re.compile(r'\b[A-Z]?\d{9}\b'),
+        {"passport"},
+        120,
+    ),
+    # Driver's license: top-state formats, near "license", "dl", "driver"
+    # CA: 1 letter + 7 digits; NY/TX: 8-9 digits; FL: 1 letter + 12 digits
+    "drivers_license": (
+        re.compile(r'\b(?:[A-Z]\d{12}|[A-Z]\d{7}|\d{8,9})\b'),
+        {"license", "dl ", " dl", "driver"},
+        120,
+    ),
+    # Canadian SIN / Australian TFN share the same 3-3-3 format
+    "canadian_sin": (
+        re.compile(r'\b\d{3}[-\s]\d{3}[-\s]\d{3}\b'),
+        {"sin", "social insurance", "canadian"},
+        120,
+    ),
+    "australian_tfn": (
+        re.compile(r'\b\d{3}[-\s]\d{3}[-\s]\d{3}\b'),
+        {"tfn", "tax file", "australian"},
+        120,
+    ),
+    # US routing / ABA number: 9 digits, near "routing" or "aba"
+    "us_routing_number": (
+        re.compile(r'\b\d{9}\b'),
+        {"routing", "aba"},
+        120,
+    ),
+    # NPI (National Provider Identifier): 10 digits, near "npi" or "provider"
+    "npi": (
+        re.compile(r'\b\d{10}\b'),
+        {"npi", "provider"},
+        120,
+    ),
+    # Date of birth: labeled with DOB / date of birth / birthday keywords.
+    # Supports both MM/DD/YYYY (US) and ISO YYYY-MM-DD formats.
+    "date_of_birth": (
+        re.compile(
+            r'(?:DOB|Date\s+of\s+Birth|Birthday|birth_?date)\s*[:=]?\s*'
+            r'(?:\d{4}[/\-\.]\d{1,2}[/\-\.]\d{1,2}|\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})',
+            re.IGNORECASE,
+        ),
+        # The keyword is embedded in the pattern itself; use an empty set so
+        # the context scan always triggers on a match (context window still
+        # checked against the inline keyword that the regex already enforces).
+        {"dob", "birth", "birthday"},
+        200,
+    ),
+    # Password in key=value / key: value format
+    "password_kv": (
+        re.compile(
+            r'\b(?:password|passwd|pwd)\s*[:=]\s*\S+',
+            re.IGNORECASE,
+        ),
+        {"password", "passwd", "pwd"},
+        200,
+    ),
+    # AWS secret access key: 40-char base64-ish, near "aws" or "secret"
+    "aws_secret_key": (
+        re.compile(r'\b[A-Za-z0-9/+=]{40}\b'),
+        {"aws", "secret"},
+        120,
+    ),
 }
 
 # File extensions that can contain readable text
@@ -84,10 +206,7 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
                 return True
         except ValueError:
             pass
-        # Version-like values: exactly 4 decimal places in a .plist or .json
-        # file are almost never GPS (e.g. 11.5600 from a CFBundleVersion key).
-        import re as _re
-        if _re.search(r'\.\d{4}$', match_text):
+        if re.search(r'\.\d{4}$', match_text):
             fname = path.split("/")[-1].split("\\")[-1]
             if fname.endswith(".plist") or fname.endswith(".json"):
                 return True
@@ -100,7 +219,7 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         # digits, treat it as a layout metric / false positive.
         fname = path.split("/")[-1].split("\\")[-1]
         if fname.endswith(".plist"):
-            decimal_match = _re.search(r'\.(\d+)$', match_text)
+            decimal_match = re.search(r'\.(\d+)$', match_text)
             if decimal_match and len(decimal_match.group(1)) >= 8:
                 return True
         # Noisy column: external_mod_tag is a sync-tag integer, not GPS.
@@ -123,12 +242,7 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         }
         if col_part.lower() in COREDATA_NOISY_COLS:
             return True
-        # Bare 9-digit integers (no dash/space separators) in .plist and
-        # .json files are almost never real SSNs — they are timestamps,
-        # Apple config integers, CoreData sequence numbers, and the like.
-        # Real SSN storage in iOS uses dashes (XXX-XX-XXXX) or spaces.
-        import re as _re
-        if _re.match(r'^\d{9}$', match_text):
+        if re.match(r'^\d{9}$', match_text):
             fname = path.split("/")[-1].split("\\")[-1]
             if fname.endswith(".plist") or fname.endswith(".json") or fname.endswith(".sqlitedb") or fname.endswith(".db"):
                 return True
@@ -161,7 +275,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
     if pattern_name == "phone_us":
         digits = "".join(c for c in match_text if c.isdigit())
         if len(digits) >= 10:
-            from collections import Counter
             most_common_count = Counter(digits).most_common(1)[0][1]
             if most_common_count >= 7:
                 return True
@@ -194,7 +307,110 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         col_part = path.rsplit(".", 1)[-1] if "." in path else ""
         if col_part in noisy_columns:
             return True
+
+    # ── New pattern false-positive filters ────────────────────────────────────
+
+    # VIN: 17-char uppercase sequences in hex-like data (SHA hashes, UUIDs,
+    # bundle IDs, kernel addresses) will collide. Suppress when the match
+    # looks like a longer hex run or UUID fragment.
+    if pattern_name == "vin":
+        # If surrounded by more hex chars it's likely a hash/address
+        import re as _re
+        if _re.search(r'[0-9A-Fa-f]{17,}', match_text):
+            return True
+
+    # SWIFT/BIC: many 8-char uppercase words in bundle/framework names look
+    # like BIC codes (e.g. "ABCDEFGH"). Only treat as real when it contains
+    # at least one digit in positions 7-8 or the optional suffix — that
+    # distinguishes financial codes from random all-alpha strings.
+    if pattern_name == "swift_bic":
+        # Must not be purely alphabetical (real BIC has digits in chars 7-8)
+        import re as _re
+        if _re.match(r'^[A-Z]{8}$', match_text):
+            # All-alpha 8-char string — too noisy, suppress unless it looks
+            # like a known SWIFT country+bank pattern (hard to verify without
+            # a lookup table, so suppress the all-alpha case)
+            return True
+
+    # Ethereum address: suppress 0x + 40 hex that are clearly kernel
+    # addresses (< 0x100000000 after prefix) — i.e. 32-bit values zero-padded
+    if pattern_name == "ethereum_address":
+        hex_val = match_text[2:]  # strip 0x
+        # If the first 24 chars are all zeros it's a padded small integer
+        if hex_val.startswith("000000000000000000000000"):
+            return True
+
+    # Bitcoin address: skip matches that are clearly short hash fragments or
+    # base58-looking sequences inside longer strings (word boundary helps but
+    # add an extra length sanity check)
+    if pattern_name == "bitcoin_address":
+        if len(match_text) < 26:
+            return True
+
+    # GitHub token: suppress if the token value looks like a UUID or other
+    # structured internal identifier (all-lowercase, no underscores)
+    # — real GH tokens always have the prefix enforced by the regex so this
+    # is just an extra guard.
+    if pattern_name == "github_token":
+        # Already constrained by prefix in regex; no additional filtering needed
+        pass
+
+    # AWS access key: real AKIA keys have mixed case — pure uppercase runs in
+    # binary data sometimes trigger; if it matches inside a longer all-caps run
+    # suppress it.
+    if pattern_name == "aws_access_key":
+        pass  # regex is tight enough (AKIA prefix + exactly 16 UPPERCASE/digit)
+
+    # DEA number: two letters + 7 digits also matches abbreviated identifiers.
+    # Suppress all-uppercase first-two-letter combos that are common English
+    # abbreviations (e.g. "IN1234567" = Indiana prefix + ZIP).
+    if pattern_name == "dea_number":
+        # The first two letters must follow DEA format: letter in A-Z, letter in A-Z9
+        # If the match is entirely within a longer word, suppress
+        pass  # word boundaries already enforced by regex
+
+    # UK NIN: a lot of database column names and config tokens in ASCII uppercase
+    # also match 2-letter + 6-digit + 1-letter. Require that the file extension
+    # is a data file (not .plist/.json system config) or the match has a space/
+    # hyphen structure (real NINs are usually written AA999999A or AA 99 99 99 A).
+    if pattern_name == "uk_nin":
+        pass  # regex enforces character class restrictions; accept all matches
+
+    # Medicare MBI: very tight pattern — 11 specific positions. Low collision risk.
+    if pattern_name == "medicare_mbi":
+        pass
+
     return False
+
+
+def _context_matches(text: str, pos_start: int, pos_end: int,
+                     keywords: set[str], window: int) -> bool:
+    """Return True if any keyword appears within `window` chars of [pos_start, pos_end]."""
+    lo = max(0, pos_start - window)
+    hi = min(len(text), pos_end + window)
+    surrounding = text[lo:hi].lower()
+    return any(kw.lower() in surrounding for kw in keywords)
+
+
+def _scan_context_patterns(text: str, path: str, line_offset: int = 0) -> list[PIIMatch]:
+    """Check CONTEXT_PATTERNS against a block of text.
+
+    Context patterns require at least one keyword to be present near the match.
+    `line_offset` is the 1-based line number of the start of `text` within its
+    source file (used when scanning line-by-line; pass 0 for whole-file scans).
+    """
+    matches = []
+    for name, (pattern, keywords, window) in CONTEXT_PATTERNS.items():
+        for m in pattern.finditer(text):
+            # For patterns whose keywords are embedded in the regex itself
+            # (date_of_birth, password_kv) every match is inherently in context.
+            if not keywords or _context_matches(text, m.start(), m.end(), keywords, window):
+                match_text = m.group()
+                if not _is_false_positive(path, name, match_text):
+                    # Compute approximate line number
+                    line_num = line_offset + text[:m.start()].count("\n") + 1
+                    matches.append(PIIMatch(path, name, match_text, line_num))
+    return matches
 
 
 def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024) -> list[PIIMatch]:
@@ -236,6 +452,9 @@ def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024) -> l
                         match_text = m.group()
                         if not _is_false_positive(rel_path, name, match_text):
                             matches.append(PIIMatch(rel_path, name, match_text, line_num))
+            # Context-dependent patterns: scan the full file content so
+            # keywords can be anywhere within the window around the match.
+            matches.extend(_scan_context_patterns(content, rel_path))
             scanned += 1
         except (OSError, UnicodeDecodeError):
             continue
@@ -328,8 +547,11 @@ def scan_sqlite_content(dump_path: Path) -> list[PIIMatch]:
                 except sqlite3.Error:
                     continue
 
-                col_type_matches = lambda t: any(x in t for x in ("TEXT", "VARCHAR", "CHAR", "CLOB")) or t == ""
-                text_cols = [c[1] for c in columns if col_type_matches((c[2] or "").upper())]
+                text_cols = [
+                    c[1] for c in columns
+                    if any(x in (c[2] or "").upper() for x in ("TEXT", "VARCHAR", "CHAR", "CLOB"))
+                    or (c[2] or "") == ""
+                ]
                 for col_name in text_cols:
                     try:
                         cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 1000")
@@ -345,6 +567,11 @@ def scan_sqlite_content(dump_path: Path) -> list[PIIMatch]:
                                             qualified_path,
                                             name, m.group(), rowid
                                         ))
+                            # Context patterns on the column value
+                            ctx = _scan_context_patterns(value, qualified_path)
+                            for cm in ctx:
+                                cm.line_number = rowid
+                            matches.extend(ctx)
                     except sqlite3.Error:
                         continue
 

@@ -9,7 +9,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hygeia.sqlite_sanitizer import (
     checkpoint_and_prepare,
-    vacuum_and_cleanup,
     sanitize_database,
     find_all_databases,
     delete_wal_orphans,
