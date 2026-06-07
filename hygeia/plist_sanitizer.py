@@ -148,11 +148,48 @@ def _redact_recursive(obj, redacted_keys: list):
             _redact_recursive(item, redacted_keys)
 
 
+def _try_scan_nested_plist_bytes(value: bytes, found_types: list, path: str):
+    """
+    If *value* looks like an embedded XML or binary plist, parse it,
+    recursively scan it for PII, and return the re-serialised bytes.
+
+    Returns None when the bytes are not a plist (certificates, raw binary,
+    etc.) so the caller can leave them untouched.
+    """
+    # Quick header check — avoid plistlib overhead on random binary blobs.
+    if not (value.startswith(b"<?xml") or value.startswith(b"bplist")):
+        return None
+    try:
+        nested = plistlib.loads(value)
+    except Exception:
+        return None
+
+    # Determine original format so we serialise back in the same way.
+    nested_fmt = plistlib.FMT_BINARY if value.startswith(b"bplist") else plistlib.FMT_XML
+
+    hits_before = len(found_types)
+    _regex_scan_plist(nested, found_types, path)
+    if len(found_types) == hits_before:
+        # No PII found — return None to leave the original bytes unchanged.
+        return None
+
+    try:
+        return plistlib.dumps(nested, fmt=nested_fmt)
+    except Exception:
+        return None
+
+
 def _regex_scan_plist(obj, found_types: list, path: str = ""):
     """
     Recursively walk ALL string values in a plist structure and apply
     PII_PATTERNS regex scanning.  Only string values are touched — booleans,
-    integers, floats, bytes, dates are left unchanged.
+    integers, floats, dates are left unchanged.
+
+    bytes values are inspected for embedded XML or binary plists (e.g. the
+    CachedBag key in com.apple.facetime.bag.plist).  If the bytes parse as a
+    plist, the nested plist is scanned recursively and the value is replaced
+    with the sanitised re-serialised bytes.  Non-plist binary data
+    (certificates, raw blobs, etc.) is left untouched.
 
     Values already replaced by pass 1 key-based sanitization (i.e. equal to
     "[REDACTED]" or starting with "[REDACTED_") are skipped to avoid double-
@@ -173,9 +210,13 @@ def _regex_scan_plist(obj, found_types: list, path: str = ""):
                     obj[key] = redacted
                     for t in types:
                         found_types.append((child_path, t))
+            elif isinstance(value, bytes):
+                sanitised = _try_scan_nested_plist_bytes(value, found_types, child_path)
+                if sanitised is not None:
+                    obj[key] = sanitised
             elif isinstance(value, (dict, list)):
                 _regex_scan_plist(value, found_types, child_path)
-            # bool, int, float, bytes, datetime — leave untouched
+            # bool, int, float, datetime — leave untouched
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
             child_path = f"{path}[{i}]"
@@ -188,6 +229,10 @@ def _regex_scan_plist(obj, found_types: list, path: str = ""):
                     obj[i] = redacted
                     for t in types:
                         found_types.append((child_path, t))
+            elif isinstance(item, bytes):
+                sanitised = _try_scan_nested_plist_bytes(item, found_types, child_path)
+                if sanitised is not None:
+                    obj[i] = sanitised
             elif isinstance(item, (dict, list)):
                 _regex_scan_plist(item, found_types, child_path)
 
