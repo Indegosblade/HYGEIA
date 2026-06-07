@@ -17,6 +17,12 @@
     "com.apple.LaunchServices.plist",
     "com.apple.mobile.installation.plist"
   ],
+  "redact_all_values_files": [
+    "data_ark.plist",
+    "com.apple.MobileGestalt.plist",
+    "com.apple.purplebuddy.plist",
+    "com.apple.mobileactivationd.plist"
+  ],
   "sensitive_key_patterns": [
     "email", "token", "auth", "password", "phone",
     "login", "user", "account", "credential",
