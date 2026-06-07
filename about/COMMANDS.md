@@ -34,6 +34,7 @@ hygeia --input PATH --output PATH [OPTIONS]
 | `--normalize-timestamps` | Set all file timestamps to epoch (anti-forensic) |
 | `--skip-verify` | Skip post-sanitization PII verification |
 | `--skip-exif` | Skip EXIF metadata stripping |
+| `--skip-forensic` | Skip anti-forensic hardening (LevelDB, caches, swap, indexes) |
 | `--optimize` | Remove localizations and caches for smaller output |
 | `--manifest PATH`, `-m` | Custom path for JSON audit manifest (default: `deletion_manifest.json`) |
 | `--verbose`, `-v` | Enable detailed logging output |

@@ -59,7 +59,7 @@ No other sanitization tool implements this complete pipeline.
 
 PII detection operates at three levels simultaneously:
 
-**Regex patterns**: 10 pattern families (email, phone US/intl, SSN, credit card, IPv4, IPv6, IBAN, MAC) applied to every TEXT column in every SQLite table and every line of every text file. Patterns are tuned to minimize false positives — SSN excludes known-invalid prefixes, IP excludes localhost/broadcast, phone requires area code validation.
+**Regex patterns**: 28+ pattern families (email, phone US/intl, SSN, credit card, IPv4, IPv6, IBAN, MAC, JWT, AWS keys, GitHub tokens, API keys, Bitcoin/Ethereum wallets, IMEI, IMSI, SWIFT/BIC, routing numbers, DEA numbers, NPI, UK NINO, Indian PAN, US EIN, VIN, and more) applied to every TEXT column in every SQLite table and every line of every text file. Patterns are tuned to minimize false positives — SSN excludes known-invalid prefixes, IP excludes localhost/broadcast, phone requires area code validation.
 
 **Column-name detection**: 50+ column names (email, username, password, phone, address, latitude, longitude, api_key, token, cookie, etc.) trigger blanket redaction regardless of content. This catches PII that doesn't match any regex pattern — a name in a `first_name` column, a street address in an `address` column.
 
