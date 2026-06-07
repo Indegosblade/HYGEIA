@@ -41,6 +41,7 @@ HIPAA_ADDITIONAL_COLUMNS = {
     "vehicle_vin", "vin", "license_plate",
     "device_serial", "serial_number", "device_id", "udid",
     "biometric", "fingerprint", "voiceprint",
+    "face_scan", "iris_scan", "face_geometry", "retina_scan",
 }
 
 GDPR_SPECIAL_CATEGORY_COLUMNS = {
