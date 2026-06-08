@@ -32,7 +32,7 @@ HYGEIA exists because no tool combines platform-aware surgical sanitization with
 ## Installation
 
 ```bash
-pip install -e .
+pip install git+https://github.com/Indegosblade/HYGEIA.git
 ```
 
 Requirements: Python 3.10+. Optional: [exiftool](https://exiftool.org/) for image metadata stripping.
