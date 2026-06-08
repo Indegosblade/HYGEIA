@@ -4,6 +4,25 @@ All notable changes to HYGEIA are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.14.0] - 2026-06-07
+
+### Changed
+- Final DRY pass: deduplicated helpers, consolidated ZIP opens, hardened CI.
+- mypy typecheck now enforced (no `continue-on-error`), config centralized in pyproject.toml.
+- Bandit security scan installs from `.[dev]` (single dependency source).
+- `.ruff_cache/` and `.mypy_cache/` added to `.gitignore`.
+
+### Fixed
+- `_inside_deleted()` extracted to module level — was duplicated as nested function in two places.
+- ZIP file opens consolidated: 3→1 for OOXML metadata strip, 2→1 for ODF.
+- `_get_existing_tables()` helper extracted — sqlite_master query was duplicated.
+- `fname`/`col_part` path parsing deduplicated in verifier (13 instances → 1 each).
+- Manifest `platform_sanitize` action now counted in `databases_sanitized`.
+- GPS redaction counted correctly as redaction, not deletion.
+- Dead `--optimize` CLI flag removed.
+- exif_stripper error key unified to list pattern.
+- CLI indentation fix after dead flag removal.
+
 ## [3.1.0] - 2026-06-07
 
 ### Added
