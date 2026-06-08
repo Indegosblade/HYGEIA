@@ -36,8 +36,10 @@ def configure(only: list[str] | None = None, skip: list[str] | None = None):
     _registry = load_patterns(only=only, skip=skip)
 
 
-PII_PATTERNS = _get_registry().regex_patterns
-CONTEXT_PATTERNS = _get_registry().context_patterns
+# Default compiled patterns — exposed for tests and external consumers.
+# Internal scan functions use _get_registry() which respects configure().
+PII_PATTERNS = get_default_registry().regex_patterns
+CONTEXT_PATTERNS = get_default_registry().context_patterns
 
 # File extensions that can contain readable text
 TEXT_SCANNABLE = {
@@ -228,8 +230,7 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
             return True
         # Hex-only strings (UUIDs, hashes, embedding IDs) are not bitcoin addresses.
         # Real bitcoin addresses use base58 (mixed case, no 0OIl).
-        import re as _re
-        if _re.fullmatch(r'[0-9a-fA-F]+', match_text[1:]):
+        if re.fullmatch(r'[0-9a-fA-F]+', match_text[1:]):
             return True
         # Database columns that store internal IDs, not crypto
         col_part = path.rsplit(".", 1)[-1] if "." in path else ""
