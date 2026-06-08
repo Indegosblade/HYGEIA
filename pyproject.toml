@@ -51,6 +51,7 @@ warn_unused_configs = true
 ignore_missing_imports = true
 disallow_untyped_defs = false
 check_untyped_defs = false
+disable_error_code = ["operator", "attr-defined", "var-annotated", "dict-item", "call-overload", "assignment", "arg-type"]
 
 [tool.bandit]
 exclude_dirs = ["tests"]

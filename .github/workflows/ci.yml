@@ -53,7 +53,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      - run: mypy hygeia/ --ignore-missing-imports --no-strict-optional --allow-untyped-defs
+      - run: mypy hygeia/
 
   security:
     name: Security Scan (bandit)
