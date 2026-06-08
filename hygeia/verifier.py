@@ -80,6 +80,10 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
     for fp_path in FALSE_POSITIVE_PATHS:
         if fp_path in path:
             return True
+
+    # Common extractions used throughout this function
+    fname = path.split("/")[-1].split("\\")[-1]
+    col_part = path.rsplit(".", 1)[-1] if "." in path else ""
     # GPS: valid lat/lon range is -90..90 / -180..180. Larger values are
     # memory sizes, version numbers, or other non-GPS floats.
     if pattern_name == "gps_coord":
@@ -94,7 +98,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         except ValueError:
             pass
         if re.search(r'\.\d{4}$', match_text):
-            fname = path.split("/")[-1].split("\\")[-1]
             if fname.endswith(".plist") or fname.endswith(".json"):
                 return True
         # High-precision binary fractions in plist files are layout/CSS metrics,
@@ -104,19 +107,16 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         # computed layout measurements, not geographic data.
         # Rule: if the file is a .plist and the decimal part has 8 or more
         # digits, treat it as a layout metric / false positive.
-        fname = path.split("/")[-1].split("\\")[-1]
         if fname.endswith(".plist"):
             decimal_match = re.search(r'\.(\d+)$', match_text)
             if decimal_match and len(decimal_match.group(1)) >= 8:
                 return True
         # Noisy column: external_mod_tag is a sync-tag integer, not GPS.
-        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
         if col_part.lower() == "external_mod_tag":
             return True
     # SSN: CoreData internal columns (Z_PK, Z_ENT, Z_OPT, ROWID …) hold
     # sequential integers that happen to match the 9-digit SSN pattern.
     if pattern_name == "ssn":
-        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
         # CoreData internal / timestamp columns hold sequential integers and
         # epoch-offset timestamps (seconds since 2001-01-01) that happen to
         # match the 9-digit SSN pattern.  None of them store real SSNs.
@@ -130,7 +130,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         if col_part.lower() in COREDATA_NOISY_COLS:
             return True
         if re.match(r'^\d{9}$', match_text):
-            fname = path.split("/")[-1].split("\\")[-1]
             if fname.endswith(".plist") or fname.endswith(".json") or fname.endswith(".sqlitedb") or fname.endswith(".db"):
                 return True
     # IPv4: Apple's 17/8 public infrastructure block and RFC-1918 private
@@ -185,7 +184,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
     # Vector/embedding database content columns store conversation text that
     # naturally contains keyword-triggered patterns (password_kv, etc.)
     if pattern_name == "password_kv":
-        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
         embedding_cols = ("string_value", "c0", "c1", "c2", "metadata",
                           "embedding_id", "document", "content")
         if col_part.lower() in embedding_cols:
@@ -200,7 +198,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
                      "fill_into_edit", "text", "contents", "value",
                      "external_mod_tag")
     if pattern_name in ("phone_us", "phone_intl", "credit_card", "ssn", "gps_coord", "imei", "iban", "mac_addr"):
-        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
         if col_part in noisy_columns:
             return True
 
@@ -217,7 +214,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         if len(set(match_text.replace(" ", ""))) <= 2:
             return True
         # Sequential/alphabetical runs in plist files are carrier bundle identifiers
-        fname = path.split("/")[-1].split("\\")[-1]
         if fname.endswith(".plist"):
             return True
 
@@ -233,7 +229,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         if re.fullmatch(r'[0-9a-fA-F]+', match_text[1:]):
             return True
         # Database columns that store internal IDs, not crypto
-        col_part = path.rsplit(".", 1)[-1] if "." in path else ""
         if col_part.lower() in ("embedding_id", "id", "uuid", "guid", "hash", "checksum"):
             return True
 
@@ -243,7 +238,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         if digits and len(set(digits)) <= 2:
             return True
         # Sequential digits (012345678, 012345679) are test/padding data in plists
-        fname = path.split("/")[-1].split("\\")[-1]
         if fname.endswith(".plist") and digits:
             return True
 
@@ -254,7 +248,6 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
 
     # DEA numbers in plist files: carrier bundle checksums look like DEA format
     if pattern_name == "dea_number":
-        fname = path.split("/")[-1].split("\\")[-1]
         if fname.endswith(".plist"):
             return True
 

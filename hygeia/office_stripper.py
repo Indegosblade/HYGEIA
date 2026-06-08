@@ -154,23 +154,26 @@ def _strip_ooxml_metadata(doc_path: Path) -> tuple[int, list[str]]:
     """
     total = 0
     errors = []
+    entries_to_strip = [
+        ("docProps/core.xml", _CORE_PII_TAGS),
+        ("docProps/app.xml", _APP_PII_TAGS),
+    ]
 
     try:
         with zipfile.ZipFile(doc_path, "r") as zf:
             names = set(zf.namelist())
+            raw_xml = {}
+            for entry, _ in entries_to_strip:
+                if entry in names:
+                    raw_xml[entry] = zf.read(entry)
     except zipfile.BadZipFile as exc:
         return 0, [f"Not a valid ZIP/OOXML file: {exc}"]
 
-    for entry, pii_tags in [
-        ("docProps/core.xml", _CORE_PII_TAGS),
-        ("docProps/app.xml", _APP_PII_TAGS),
-    ]:
-        if entry not in names:
+    for entry, pii_tags in entries_to_strip:
+        if entry not in raw_xml:
             continue
         try:
-            with zipfile.ZipFile(doc_path, "r") as zf:
-                xml_bytes = zf.read(entry)
-            new_xml, count = _blank_xml_tags(xml_bytes, pii_tags)
+            new_xml, count = _blank_xml_tags(raw_xml[entry], pii_tags)
             if count > 0:
                 _rewrite_zip_entry(doc_path, entry, new_xml)
                 total += count
@@ -189,32 +192,28 @@ def _strip_odf_metadata(doc_path: Path) -> tuple[int, list[str]]:
 
     Returns (total_fields_blanked, list_of_errors).
     """
-    total = 0
     errors = []
 
     try:
         with zipfile.ZipFile(doc_path, "r") as zf:
-            names = set(zf.namelist())
+            if "meta.xml" not in zf.namelist():
+                return 0, []
+            xml_bytes = zf.read("meta.xml")
     except zipfile.BadZipFile as exc:
         return 0, [f"Not a valid ZIP/ODF file: {exc}"]
 
-    if "meta.xml" not in names:
-        return 0, []
-
     try:
-        with zipfile.ZipFile(doc_path, "r") as zf:
-            xml_bytes = zf.read("meta.xml")
         new_xml, count = _blank_xml_tags(xml_bytes, _ODF_META_PII_TAGS)
         if count > 0:
             _rewrite_zip_entry(doc_path, "meta.xml", new_xml)
-            total += count
             log.debug(f"{doc_path.name}/meta.xml: {count} fields blanked")
+            return count, errors
     except ET.ParseError as exc:
         errors.append(f"meta.xml: XML parse error: {exc}")
     except (OSError, zipfile.BadZipFile) as exc:
         errors.append(f"meta.xml: {exc}")
 
-    return total, errors
+    return 0, errors
 
 
 def strip_office_metadata(doc_path: Path) -> dict:

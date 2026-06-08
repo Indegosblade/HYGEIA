@@ -18,6 +18,17 @@ from pathlib import Path
 
 from .utils import sha256 as _sha256
 
+
+def _inside_deleted(p: Path, deleted_dirs: list) -> bool:
+    """Check if path is inside any already-deleted directory."""
+    for d in deleted_dirs:
+        try:
+            p.relative_to(d)
+            return True
+        except ValueError:
+            pass
+    return False
+
 log = logging.getLogger("hygeia.forensic_cleaner")
 
 
@@ -150,20 +161,11 @@ def clean_thumbnail_caches(dump_path, dry_run=False):
     actions = []
     deleted_dirs = []
 
-    def _inside_deleted(p):
-        for d in deleted_dirs:
-            try:
-                p.relative_to(d)
-                return True
-            except ValueError:
-                pass
-        return False
-
     all_paths = sorted(dump_path.rglob("*"), key=lambda x: len(x.parts))
     for dirpath in all_paths:
         if not dirpath.is_dir():
             continue
-        if _inside_deleted(dirpath):
+        if _inside_deleted(dirpath, deleted_dirs):
             continue
         if _is_cache_dir(dirpath, dump_path):
             rel = str(dirpath.relative_to(dump_path))
@@ -177,7 +179,7 @@ def clean_thumbnail_caches(dump_path, dry_run=False):
     for fp in list(dump_path.rglob("*")):
         if not fp.is_file():
             continue
-        if _inside_deleted(fp):
+        if _inside_deleted(fp, deleted_dirs):
             continue
         if fp.name.lower() in _CACHE_FILE_NAMES_LOWER:
             rel = str(fp.relative_to(dump_path))
@@ -409,22 +411,13 @@ def clean_crash_reporter_data(dump_path, dry_run=False):
     actions = []
     deleted_dirs: list = []
 
-    def _inside_deleted(p: Path) -> bool:
-        for d in deleted_dirs:
-            try:
-                p.relative_to(d)
-                return True
-            except ValueError:
-                pass
-        return False
-
     # Walk directories first (sorted by depth so parents are processed before children)
     all_dirs = sorted(
         (p for p in dump_path.rglob("*") if p.is_dir()),
         key=lambda x: len(x.parts),
     )
     for dirpath in all_dirs:
-        if _inside_deleted(dirpath):
+        if _inside_deleted(dirpath, deleted_dirs):
             continue
         name_lower = dirpath.name.lower()
         rel_lower = str(dirpath.relative_to(dump_path)).replace("\\", "/").lower()
@@ -449,7 +442,7 @@ def clean_crash_reporter_data(dump_path, dry_run=False):
     for fp in list(dump_path.rglob("*")):
         if not fp.is_file():
             continue
-        if _inside_deleted(fp):
+        if _inside_deleted(fp, deleted_dirs):
             continue
         if fp.suffix.lower() in _CRASH_FILE_SUFFIXES:
             rel = str(fp.relative_to(dump_path))

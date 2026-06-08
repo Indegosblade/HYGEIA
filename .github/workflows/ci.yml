@@ -54,7 +54,6 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       - run: mypy hygeia/ --ignore-missing-imports --no-strict-optional --allow-untyped-defs
-        continue-on-error: true
 
   security:
     name: Security Scan (bandit)
@@ -64,5 +63,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install bandit
+      - run: pip install -e ".[dev]"
       - run: bandit -r hygeia/ -c pyproject.toml
