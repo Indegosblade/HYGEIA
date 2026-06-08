@@ -168,7 +168,7 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
             for plist in all_plists:
                 actions.append({"action": "plist_sanitize", "path": str(plist.relative_to(work_path)), "dry_run": True})
         elif workers > 1:
-            plist_results = [None] * total_plists
+            plist_results: list[dict | None] = [None] * total_plists
             futures_map = {}
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 for idx, plist in enumerate(all_plists):
