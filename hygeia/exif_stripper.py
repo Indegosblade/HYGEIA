@@ -99,7 +99,7 @@ def strip_exif_directory(path: Path) -> dict:
     except subprocess.TimeoutExpired:
         result["errors"].append("exiftool timed out after 600s")
     except FileNotFoundError:
-        result["error"] = "exiftool not found"
+        result["errors"].append("exiftool not found")
 
     return result
 

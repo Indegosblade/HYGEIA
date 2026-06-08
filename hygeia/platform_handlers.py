@@ -106,16 +106,20 @@ def detect_database_type(db_path: Path) -> Optional[str]:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _get_existing_tables(conn: sqlite3.Connection) -> set[str]:
+    """Return set of lowercase table names in the database."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    return {row[0].lower() for row in cursor.fetchall()}
+
+
 def _delete_tables(conn: sqlite3.Connection, tables_to_clear: list[str]) -> tuple[list[str], int]:
     """
     DELETE all rows from each named table that exists in the database.
     Returns (cleared_table_names, total_rows_deleted).
     """
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    )
-    existing = {row[0].lower() for row in cursor.fetchall()}
+    existing = _get_existing_tables(conn)
 
     cleared = []
     total = 0
@@ -145,11 +149,7 @@ def _redact_columns(
     Returns rows affected.
     """
     cursor = conn.cursor()
-    # Confirm table exists
-    cursor.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    )
-    existing = {row[0].lower() for row in cursor.fetchall()}
+    existing = _get_existing_tables(conn)
     if table.lower() not in existing:
         return 0
 
@@ -168,7 +168,7 @@ def _redact_columns(
                 f'WHERE "{actual}" IS NOT NULL AND "{actual}" != ""',
                 (redact_value,),
             )
-            total += cursor.rowcount if cursor.rowcount > 0 else 0
+            total += max(0, cursor.rowcount)
         except sqlite3.Error as e:
             log.warning(f"Could not redact {table}.{actual}: {e}")
     conn.commit()
@@ -296,9 +296,10 @@ def _handle_photos_ios(db_path: Path) -> dict:
 
         # Redact GPS from asset tables
         gps_cols = ["ZLATITUDE", "ZLONGITUDE", "ZLOCATION"]
+        rows_redacted = 0
         for asset_table in ("ZASSET", "ZGENERICASSET"):
-            gps_rows = _redact_columns(conn, asset_table, gps_cols, "[GPS_REMOVED]")
-            result["rows_deleted"] += gps_rows
+            rows_redacted += _redact_columns(conn, asset_table, gps_cols, "[GPS_REMOVED]")
+        result["rows_redacted"] = rows_redacted
 
         vacuum_and_cleanup(conn, db_path)
     except sqlite3.Error as e:

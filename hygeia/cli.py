@@ -214,7 +214,6 @@ def main():
                              "Example: --skip-patterns crypto,vehicle")
     parser.add_argument("--list-patterns", action="store_true",
                         help="List all available pattern categories and exit")
-    parser.add_argument("--optimize", action="store_true", help="Remove localizations and caches")
     parser.add_argument("--manifest", "-m", help="Custom path for audit manifest")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     parser.add_argument(
