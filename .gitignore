@@ -33,3 +33,4 @@ venv/
 htmlcov/
 
 manifest*.json
+PYPI_PUBLISH.md
