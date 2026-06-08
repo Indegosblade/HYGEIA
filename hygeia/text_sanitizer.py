@@ -250,9 +250,15 @@ def sanitize_all_text_files(dump_path: Path, dry_run: bool = False,
             actions.append(delete_shell_history(hist))
 
     # Build workload lists for the three parallelisable types
-    json_files = [jf for jf in files["json"] if jf.stat().st_size <= 50 * 1024 * 1024]
-    log_files = [lf for lf in files["log"] if lf.stat().st_size <= 10 * 1024 * 1024]
-    csv_files = [cf for cf in files["csv"] if cf.stat().st_size <= 50 * 1024 * 1024]
+    def _within_limit(f: Path, limit: int) -> bool:
+        try:
+            return f.stat().st_size <= limit
+        except OSError:
+            return False
+
+    json_files = [jf for jf in files["json"] if _within_limit(jf, 50 * 1024 * 1024)]
+    log_files = [lf for lf in files["log"] if _within_limit(lf, 10 * 1024 * 1024)]
+    csv_files = [cf for cf in files["csv"] if _within_limit(cf, 50 * 1024 * 1024)]
 
     if dry_run:
         for jf in json_files:

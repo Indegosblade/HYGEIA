@@ -97,21 +97,22 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path):
                     pass
             return False
 
-    attempts = [
-        (0.1, _do_vacuum),
-        (0.3, _do_vacuum),
-        (0.9, _do_vacuum_journal_delete),
+    strategies = [
+        _do_vacuum,
+        _do_vacuum,
+        _do_vacuum_journal_delete,
     ]
-    if not _do_vacuum(db_path):
-        for delay, fn in attempts:
-            time.sleep(delay)
-            if fn(db_path):
-                break
-        else:
-            log.warning(
-                f"VACUUM failed on {db_path} after all retries — "
-                f"free pages may remain (expected for locked WAL databases)"
-            )
+    delays = [0.1, 0.3, 0.9]
+    for i, fn in enumerate(strategies):
+        if fn(db_path):
+            break
+        if i < len(delays):
+            time.sleep(delays[i])
+    else:
+        log.warning(
+            f"VACUUM failed on {db_path} after all retries — "
+            f"free pages may remain (expected for locked WAL databases)"
+        )
 
     # Delete WAL/SHM/journal files
     for suffix in WAL_SUFFIXES:
@@ -315,7 +316,10 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
                 col_type = (col[2] or "").upper()
                 if col[5]:  # primary key flag
                     pk_cols.add(col_name.lower())
-                if any(t in col_type for t in ("TEXT", "VARCHAR", "CHAR", "CLOB")) or col_type == "" or col_name.lower() in SENSITIVE_COLUMNS:
+                is_text_type = any(t in col_type for t in ("TEXT", "VARCHAR", "CHAR", "CLOB"))
+                is_untyped = col_type == ""
+                is_sensitive = col_name.lower() in SENSITIVE_COLUMNS
+                if is_text_type or is_untyped or is_sensitive:
                     text_cols.append(col_name)
 
             for col_name in text_cols:
