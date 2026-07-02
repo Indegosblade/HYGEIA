@@ -12,6 +12,7 @@ from hygeia.sqlite_sanitizer import (
     sanitize_database,
     find_all_databases,
     delete_wal_orphans,
+    vacuum_and_cleanup,
 )
 
 
@@ -116,10 +117,83 @@ def test_vacuum_succeeds_after_connection_cleanup():
         assert free_pages == 0, f"Expected 0 free pages after VACUUM, got {free_pages}"
 
 
+def test_vacuum_and_cleanup_returns_false_when_locked():
+    """#15: a real VACUUM failure (external write lock — the 'locked WAL'
+    scenario the code explicitly anticipates) must be reported as False, not
+    silently tolerated. A False return is the fail-closed signal that freelist
+    pages of deleted records were NOT reclaimed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = Path(tmp) / "x.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE t (id INTEGER, v TEXT)")
+        # Large per-row values across many pages so deleting most rows leaves
+        # whole freelist pages (recoverable deleted-record bytes) behind.
+        conn.executemany("INSERT INTO t VALUES (?, ?)",
+                         [(i, "x" * 300) for i in range(600)])
+        conn.commit()
+        conn.execute("DELETE FROM t WHERE id > 5")
+        conn.commit()
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] > 0
+
+        # Another connection holds a write lock so VACUUM cannot run.
+        locker = sqlite3.connect(str(db))
+        locker.execute("BEGIN IMMEDIATE")
+        locker.execute("CREATE TABLE lock_me (x)")
+        try:
+            ok = vacuum_and_cleanup(conn, db)  # closes conn internally
+        finally:
+            locker.rollback()
+            locker.close()
+        assert ok is False, "VACUUM failure under lock must return False (fail closed)"
+
+
+def test_wal_orphan_kept_when_suffix_in_parent_dir():
+    """#17/#39: a directory name containing '-journal' must not corrupt parent-DB
+    resolution. A live DB's companion journal must be KEPT, not deleted as a
+    false orphan (the old global str.replace collapsed the dir → data loss)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp) / "case-journal" / "clean"
+        d.mkdir(parents=True)
+        db = d / "x.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE t (id INTEGER)")
+        conn.commit()
+        conn.close()
+        journal = Path(str(db) + "-journal")
+        journal.write_bytes(b"committed frames not yet merged")
+
+        deleted = delete_wal_orphans(Path(tmp))
+
+        assert journal.exists(), "live DB companion wrongly deleted as orphan (data loss)"
+        assert journal not in deleted
+
+
+def test_true_orphan_wal_deleted_despite_suffix_in_path():
+    """#17/#39: a genuine orphan WAL under a '-wal' directory must still be
+    deleted even when an unrelated DB exists at the path the buggy replace-all
+    would collapse to — otherwise the orphan's recoverable PII frames survive."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        (tmp / "wallet-wal").mkdir()
+        orphan = tmp / "wallet-wal" / "data.db-wal"
+        orphan.write_bytes(b"recoverable deleted-record frames with PII")
+        # Unrelated DB at the path replace('-wal','') would resolve the orphan to.
+        (tmp / "wallet").mkdir()
+        (tmp / "wallet" / "data.db").write_bytes(b"unrelated file")
+
+        deleted = delete_wal_orphans(tmp)
+
+        assert not orphan.exists(), "true orphan WAL survived — recoverable PII kept (false clean)"
+        assert orphan in deleted
+
+
 if __name__ == "__main__":
     test_checkpoint_and_prepare()
     test_sanitize_database()
     test_find_all_databases()
     test_delete_wal_orphans()
     test_vacuum_succeeds_after_connection_cleanup()
+    test_vacuum_and_cleanup_returns_false_when_locked()
+    test_wal_orphan_kept_when_suffix_in_parent_dir()
+    test_true_orphan_wal_deleted_despite_suffix_in_path()
     print("All tests passed.")

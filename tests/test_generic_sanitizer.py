@@ -4,10 +4,27 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import hygeia.sqlite_sanitizer as ss
 from hygeia.sqlite_sanitizer import sanitize_database_generic
+
+
+def _new_db() -> Path:
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    p = Path(f.name)
+    f.close()
+    return p
+
+
+def _blob_bytes(v) -> bytes:
+    if isinstance(v, memoryview):
+        return v.tobytes()
+    if isinstance(v, (bytes, bytearray)):
+        return bytes(v)
+    return str(v).encode("utf-8")
 
 
 def _make_db(tables_and_data: dict) -> Path:
@@ -509,6 +526,207 @@ def test_new_sensitive_columns():
     conn.close()
     for val in row:
         assert val == "[REDACTED]", f"New sensitive column not redacted: {val}"
+    db.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Finding #3 — identifiers containing a double-quote must not be silently skipped
+# ---------------------------------------------------------------------------
+
+def test_double_quote_in_table_name_still_redacted():
+    """#3: a table whose literal name contains a double-quote (mes\"sages) used to
+    build malformed SQL that was swallowed by `except sqlite3.Error`, skipping the
+    table and leaving its PII (false clean). It must now be redacted."""
+    db = _new_db()
+    conn = sqlite3.connect(str(db))
+    conn.execute('CREATE TABLE "mes""sages" (id INTEGER, body TEXT)')
+    conn.execute('INSERT INTO "mes""sages" VALUES (1, ?)',
+                 ("reach me at victim@example.com",))
+    conn.commit()
+    conn.close()
+    result = sanitize_database_generic(db)
+    assert "error" not in result, f"unexpected error: {result.get('error')}"
+    conn = sqlite3.connect(str(db))
+    val = conn.execute('SELECT body FROM "mes""sages" WHERE id=1').fetchone()[0]
+    conn.close()
+    assert "victim@example.com" not in val, f"PII survived in quoted-name table: {val}"
+    assert "REDACTED" in val
+    db.unlink()
+
+
+def test_double_quote_in_column_name_still_redacted():
+    """#3: a column whose literal name contains a double-quote must be scanned."""
+    db = _new_db()
+    conn = sqlite3.connect(str(db))
+    conn.execute('CREATE TABLE logs (id INTEGER, "we""ird" TEXT)')
+    conn.execute('INSERT INTO logs VALUES (1, ?)', ("SSN 123-45-6789 on file",))
+    conn.commit()
+    conn.close()
+    sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    val = conn.execute('SELECT "we""ird" FROM logs WHERE id=1').fetchone()[0]
+    conn.close()
+    assert "123-45-6789" not in val, f"PII survived in quoted-name column: {val}"
+    db.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Finding #14 — BLOB and non-str cells / any-affinity columns
+# ---------------------------------------------------------------------------
+
+def test_blob_column_utf8_pii_redacted():
+    """#14: PII stored as UTF-8 bytes in a BLOB column must be decoded & redacted.
+    (Table 'blobstore' is deliberately NOT a nuke-listed PII table, so this
+    exercises per-cell BLOB redaction rather than a whole-table DELETE.)"""
+    db = _new_db()
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE blobstore (id INTEGER, payload BLOB)")
+    conn.execute("INSERT INTO blobstore VALUES (1, ?)",
+                 (b"chat body: contact victim@example.com now",))
+    conn.commit()
+    conn.close()
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 1, result
+    conn = sqlite3.connect(str(db))
+    stored = conn.execute("SELECT payload FROM blobstore WHERE id=1").fetchone()[0]
+    conn.close()
+    text = _blob_bytes(stored).decode("utf-8", errors="ignore")
+    assert "victim@example.com" not in text, f"UTF-8 BLOB PII survived: {text!r}"
+    assert "REDACTED" in text
+
+
+def test_blob_column_utf16_pii_redacted():
+    """#14: PII stored as UTF-16 bytes in a BLOB column must be decoded & redacted."""
+    db = _new_db()
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE blobstore (id INTEGER, payload BLOB)")
+    conn.execute("INSERT INTO blobstore VALUES (1, ?)",
+                 ("note: email victim2@example.com".encode("utf-16"),))
+    conn.commit()
+    conn.close()
+    result = sanitize_database_generic(db)
+    assert result["rows_redacted"] >= 1, result
+    conn = sqlite3.connect(str(db))
+    stored = conn.execute("SELECT payload FROM blobstore WHERE id=1").fetchone()[0]
+    conn.close()
+    raw = _blob_bytes(stored)
+    text16 = raw.decode("utf-16", errors="ignore")
+    assert "victim2@example.com" not in text16, f"UTF-16 BLOB PII survived: {text16!r}"
+    assert "victim2@example.com".encode("utf-16-le") not in raw
+
+
+def test_integer_affinity_column_holding_text_pii_redacted():
+    """#14: SQLite is dynamically typed — a column declared INTEGER can hold a
+    TEXT string with PII. Old code excluded non-TEXT-affinity columns entirely."""
+    db = _new_db()
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE t (id INTEGER, code INTEGER)")
+    conn.execute("INSERT INTO t VALUES (1, ?)", ("email me at victim@example.com",))
+    conn.commit()
+    conn.close()
+    sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    val = conn.execute("SELECT code FROM t WHERE id=1").fetchone()[0]
+    conn.close()
+    assert "victim@example.com" not in str(val), f"PII in INTEGER-typed column survived: {val}"
+
+
+# ---------------------------------------------------------------------------
+# Finding #15 — VACUUM failure must fail closed (not report success)
+# ---------------------------------------------------------------------------
+
+def test_vacuum_failure_flags_result_not_clean():
+    """#15: when VACUUM cannot reclaim freelist pages, the result must carry an
+    error / vacuum_failed flag so the pipeline does NOT treat the DB as sanitized,
+    while the redactions that DID succeed are still applied."""
+    db = _make_db({"notes": ("id INTEGER, body TEXT", [
+        (1, "reach victim@example.com"),
+    ])})
+
+    def fake_vacuum(conn, db_path):
+        conn.commit()
+        conn.close()
+        return False  # simulate a persistent VACUUM failure (locked WAL, low disk)
+
+    with patch.object(ss, "vacuum_and_cleanup", side_effect=fake_vacuum):
+        result = ss.sanitize_database_generic(db)
+
+    assert result.get("vacuum_failed") is True, f"vacuum failure not flagged: {result}"
+    assert result.get("error"), "a VACUUM failure must surface as an error (fail closed)"
+    conn = sqlite3.connect(str(db))
+    val = conn.execute("SELECT body FROM notes WHERE id=1").fetchone()[0]
+    conn.close()
+    assert "victim@example.com" not in val, "redaction that succeeded must still apply"
+    db.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Findings #16 / #18 — FTS5 shadow-table cleanup + corruption gating
+# ---------------------------------------------------------------------------
+
+def test_fts5_with_content_index_rebuilt_clean():
+    """#16: after redaction, the FTS5 inverted index is rebuilt so the tokenized
+    PII is neither present in the _data shadow blob nor searchable via MATCH."""
+    db = _new_db()
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE VIRTUAL TABLE search USING fts5(title, body)")
+    conn.execute("INSERT INTO search VALUES ('T', 'reach victimuniq@example.com today')")
+    conn.commit()
+    # sanity: the token is searchable before sanitization
+    assert conn.execute("SELECT count(*) FROM search WHERE search MATCH 'victimuniq'").fetchone()[0] == 1
+    conn.close()
+
+    result = sanitize_database_generic(db)
+    assert "error" not in result, f"unexpected error: {result.get('error')}"
+
+    conn = sqlite3.connect(str(db))
+    content = str(conn.execute("SELECT * FROM search_content").fetchall())
+    assert "victimuniq@example.com" not in content, "FTS5 content not redacted"
+    blob = b"".join(b[0] for b in conn.execute("SELECT block FROM search_data").fetchall() if b[0])
+    assert b"victimuniq" not in blob, "tokenized PII survived in FTS5 _data index"
+    still = conn.execute("SELECT count(*) FROM search WHERE search MATCH 'victimuniq'").fetchone()[0]
+    conn.close()
+    assert still == 0, "redacted token still searchable in FTS5 index"
+    db.unlink()
+
+
+def test_contentless_fts5_uncleanable_fails_closed():
+    """#16/#18: a contentless FTS5 index cannot be rebuilt, and a raw DELETE of
+    its shadow tables corrupts it ('malformed inverted index'). HYGEIA must NOT
+    ship a corrupt DB and must NOT silently report clean: it rolls the delete
+    back (DB stays valid) and surfaces an error flag."""
+    db = _new_db()
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE VIRTUAL TABLE cl USING fts5(body, content='')")
+    conn.execute("INSERT INTO cl(rowid, body) VALUES (1, 'contact victimtoken secret')")
+    conn.commit()
+    conn.close()
+
+    result = sanitize_database_generic(db)
+    assert result.get("error"), f"contentless FTS5 must surface an error, got: {result}"
+    assert "cl" in (result.get("fts_cleanup_incomplete") or []), result
+    # Rolled back => DB left valid, never shipped corrupt (finding #18).
+    assert result.get("integrity_post") is True, "DB must remain valid after rollback"
+    conn = sqlite3.connect(str(db))
+    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    conn.close()
+    db.unlink()
+
+
+def test_fts_detection_does_not_wipe_lookalike_table():
+    """#16 safety: an ordinary table named like a shadow (user_data) whose sibling
+    'user' exists must NOT be mistaken for an FTS shadow and wiped."""
+    db = _make_db({
+        "user": ("id INTEGER, name TEXT", [(1, "safe")]),
+        "user_data": ("id INTEGER, note TEXT", [(1, "keep this row")]),
+    })
+    sanitize_database_generic(db)
+    conn = sqlite3.connect(str(db))
+    n = conn.execute("SELECT COUNT(*) FROM user_data").fetchone()[0]
+    val = conn.execute("SELECT note FROM user_data WHERE id=1").fetchone()[0]
+    conn.close()
+    assert n == 1, "non-FTS lookalike table wrongly wiped"
+    assert val == "keep this row"
     db.unlink()
 
 
