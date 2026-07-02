@@ -405,7 +405,7 @@
     "financial": ["card_number", "card_holder", "cardholder", "expiration", "cvv", "routing_number", "routing", "bank_account", "account_number", "swift", "bic", "swift_code", "bic_code", "sin", "tfn", "salary", "income", "wage", "purchase_history", "ssn", "social_security", "tax_id", "ein", "itin"],
     "government_id": ["passport", "passport_number", "drivers_license", "license_number", "national_id", "insurance_number", "policy_number"],
     "healthcare": ["patient_id", "mrn", "medical_record", "npi", "dea_number", "diagnosis", "diagnosis_code", "prescription", "medication", "date_of_birth", "dob", "birthdate", "birthday", "health_plan_id", "member_id", "subscriber_id"],
-    "location": ["latitude", "longitude", "lat", "lng", "lon", "geolocation", "coordinates", "gps"],
+    "location": ["latitude", "longitude", "lat", "lng", "lon", "geolocation", "coordinates", "gps", "zlatitude", "zlongitude", "zlocation", "zaltitude", "zcoordinate"],
     "device": ["ip_address", "ipaddr", "remote_addr", "mac_address", "hwaddr", "device_id", "device_name", "device_udid", "udid", "serial_number", "imei", "imsi", "iccid", "meid", "ssid", "wifi_name", "network_name"],
     "biometric": ["fingerprint", "biometric", "face_data", "race", "ethnicity", "religion", "political_affiliation", "sexual_orientation", "gender", "sex", "genetic_data", "health_data"],
     "browser": ["host_key", "encrypted_value", "user_agent"]
@@ -420,7 +420,8 @@
     "device": ["ip_address", "mac_address", "device_id", "device_udid", "udid", "serial_number", "imei", "imsi", "iccid", "ssid"],
     "location": ["latitude", "longitude", "lat", "lng", "geolocation", "coordinates"],
     "biometric": ["fingerprint", "biometric", "face_data", "race", "ethnicity", "religion", "sexual_orientation"],
-    "platform": ["google.services.username", "profile.name"]
+    "platform": ["google.services.username", "profile.name"],
+    "address": ["address", "street", "city", "zip", "zipcode", "zip_code", "postal_code", "street_address", "street_number", "address_line_1", "address_line_2", "home_address", "mailing_address", "billing_address", "company_name", "company", "employer", "organization"]
   },
   "pii_tables": {
     "_comment": "Database tables that are entirely PII — all rows deleted, schema preserved.",
