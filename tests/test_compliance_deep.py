@@ -15,8 +15,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hygeia.sqlite_sanitizer import sanitize_database_generic
 from hygeia.compliance import (
-    get_compliance_profile,
+    generalize_date,
     generate_compliance_report,
+    get_compliance_profile,
+    truncate_zip,
 )
 
 
@@ -967,6 +969,89 @@ def test_extra_columns_parameter_respected():
             assert val == "[REDACTED]", f"custom extra_column not redacted: {val!r}"
     finally:
         db.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Finding #5 — HIPAA Safe Harbor date generalization + ZIP truncation are now
+# real, tested transforms (previously date_generalization/zip_truncation were
+# dead flags that never touched the data).
+# ---------------------------------------------------------------------------
+
+def test_truncate_zip_keeps_first_three_digits():
+    assert truncate_zip("90210") == "902"
+    assert truncate_zip("94103") == "941"
+
+
+def test_truncate_zip_restricted_prefix_becomes_000():
+    # 036 / 059 are among the 17 low-population prefixes -> must generalize to 000.
+    assert truncate_zip("03601") == "000"
+    assert truncate_zip("036") == "000"
+    assert truncate_zip("05901") == "000"
+
+
+def test_truncate_zip_plus_four_form():
+    assert truncate_zip("90210-1234") == "902"
+
+
+def test_truncate_zip_fail_closed_when_no_zip_digits():
+    # A helper that de-identifies must never return the original on failure.
+    assert truncate_zip("N/A") == "000"
+    assert truncate_zip("") == "000"
+
+
+def test_generalize_date_iso_drops_month_and_day():
+    out = generalize_date("2019-03-14")
+    assert out == "2019"
+    assert "03" not in out and "14" not in out
+
+
+def test_generalize_date_us_slash_form():
+    assert generalize_date("03/14/2019") == "2019"
+
+
+def test_generalize_date_textual_form():
+    assert generalize_date("March 15, 1985") == "1985"
+
+
+def test_generalize_date_compact_eight_digit_forms():
+    assert generalize_date("20190314") == "2019"   # YYYYMMDD
+    assert generalize_date("03142019") == "2019"   # MMDDYYYY
+
+
+def test_generalize_date_fail_closed_on_two_digit_year():
+    # Cannot confidently recover a 4-digit year -> redact, never leak day/month.
+    out = generalize_date("03/14/85")
+    assert out == "[REDACTED]"
+    assert "14" not in out and "85" not in out
+
+
+def test_generalize_date_empty_is_redacted():
+    assert generalize_date("") == "[REDACTED]"
+
+
+def test_hipaa_profile_transform_value_applies_safe_harbor():
+    # Audit scenario values: encounter_date='2019-03-14', zip='90210'.
+    profile = get_compliance_profile("hipaa")
+    assert profile.transform_value("encounter_date", "2019-03-14") == "2019"
+    assert profile.transform_value("zip", "90210") == "902"
+    assert profile.transform_value("date_of_birth", "1985-03-15") == "1985"
+    assert profile.transform_value("postal_code", "03601") == "000"
+    # Columns that are neither dates nor ZIPs pass through untouched.
+    assert profile.transform_value("notes", "hello world") == "hello world"
+
+
+def test_non_hipaa_profile_transform_value_is_noop():
+    # date_generalization / zip_truncation are HIPAA-only; other profiles leave
+    # the flags off, so transform_value must not mutate values.
+    profile = get_compliance_profile("gdpr")
+    assert profile.transform_value("zip", "90210") == "90210"
+    assert profile.transform_value("date_of_birth", "1985-03-15") == "1985-03-15"
+
+
+def test_all_profile_transform_value_applies_safe_harbor():
+    profile = get_compliance_profile("all")
+    assert profile.transform_value("dob", "12/25/1990") == "1990"
+    assert profile.transform_value("zipcode", "90210") == "902"
 
 
 if __name__ == "__main__":
