@@ -5,9 +5,11 @@ import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import hygeia.verifier as V
 from hygeia.verifier import (
     verify_sanitization, scan_text_files, scan_sqlite_content,
     scan_sqlite_freelist, _is_false_positive,
@@ -67,8 +69,10 @@ def test_email_detected_in_sqlite():
 
 
 def test_freelist_detection():
-    """A database with free pages and an open lock (VACUUM cannot run) should
-    suppress the finding — the freelist is expected for locked databases."""
+    """INVERTED (#4/#26/#40): free pages hold recoverable deleted-row bytes.
+    Verification is READ-ONLY and no longer VACUUMs, so a non-empty freelist is
+    a FINDING even while another connection holds the database open — it is
+    never suppressed as 'expected for locked databases'."""
     d = tempfile.mkdtemp()
     db = Path(d) / "test.db"
     conn = sqlite3.connect(str(db))
@@ -79,14 +83,17 @@ def test_freelist_detection():
     conn.commit()
     conn.execute("DELETE FROM t WHERE id > 5")
     conn.commit()
-    # Hold an open transaction to block VACUUM
+    # Hold an open read transaction on the same file (used to block VACUUM in
+    # the old fail-open path); the read-only inspection must still see the
+    # freelist.
     conn.execute("BEGIN")
     conn.execute("SELECT * FROM t LIMIT 1")
-    findings = scan_sqlite_freelist(db)
+    incomplete: list = []
+    findings = scan_sqlite_freelist(db, incomplete=incomplete)
     conn.rollback()
     conn.close()
-    # VACUUM is blocked → finding suppressed (not a sanitization gap)
-    assert len(findings) == 0, f"Locked freelist should be suppressed, got: {findings}"
+    assert len(findings) >= 1, f"Locked-DB freelist must be reported, got: {findings}"
+    assert incomplete == [], f"Readable freelist is a finding, not incomplete: {incomplete}"
     shutil.rmtree(d, ignore_errors=True)
 
 
@@ -182,13 +189,21 @@ def test_manifest_files_skipped_by_scanner():
     shutil.rmtree(d)
 
 
-def test_bare_9digit_ssn_in_plist_is_false_positive():
-    """Bare 9-digit integers in .plist files (timestamps, config ints) must not
-    be flagged as SSNs — real SSNs in iOS are formatted with dashes."""
-    assert _is_false_positive("Preferences/cloud.quota.plist", "ssn", "777777789") is True
-    assert _is_false_positive("Preferences/facetime.bag.plist", "ssn", "201326586") is True
-    assert _is_false_positive("Preferences/routined.plist", "ssn", "013456789") is True
-    assert _is_false_positive("Preferences/tipsd.plist", "ssn", "012345678") is True
+def test_bare_9digit_ssn_in_plist_is_now_flagged():
+    """INVERTED (#25): the blanket extension-based suppression is removed. A bare
+    9-digit SSN in a .plist/.json is a real finding — only CoreData COLUMN names
+    (Z_PK/Z_ENT/timestamp cols) may suppress a bare-9-digit match, never the file
+    extension."""
+    assert _is_false_positive("Preferences/cloud.quota.plist", "ssn", "777777789") is False
+    assert _is_false_positive("Preferences/facetime.bag.plist", "ssn", "201326586") is False
+    assert _is_false_positive("Preferences/routined.plist", "ssn", "013456789") is False
+    assert _is_false_positive("Preferences/tipsd.plist", "ssn", "012345678") is False
+
+
+def test_bare_9digit_ssn_in_json_is_flagged():
+    """The audit's exact scenario: a JSON export field "ssn":"123456789" must be
+    flagged, not suppressed because the file ends in .json (#25)."""
+    assert _is_false_positive("export/userdata.json", "ssn", "123456789") is False
 
 
 def test_formatted_ssn_in_plist_is_not_false_positive():
@@ -196,11 +211,12 @@ def test_formatted_ssn_in_plist_is_not_false_positive():
     assert _is_false_positive("Preferences/some.plist", "ssn", "123-45-6789") is False
 
 
-def test_bare_9digit_ssn_in_sqlite_is_false_positive():
-    """Bare 9-digit integers in SQLite databases (sequence numbers, CoreData)
-    are not SSNs."""
-    assert _is_false_positive("data/Calendar.sqlitedb", "ssn", "802498179") is True
-    assert _is_false_positive("data/Extras.db", "ssn", "803772792") is True
+def test_bare_9digit_ssn_in_sqlite_is_now_flagged():
+    """INVERTED (#25): a bare 9-digit SSN in a .sqlitedb/.db with no CoreData
+    column qualifier is a finding. Real CoreData sequence integers are still
+    suppressed elsewhere by COLUMN NAME (Z_PK/ZDATE/…), never by extension."""
+    assert _is_false_positive("data/Calendar.sqlitedb", "ssn", "802498179") is False
+    assert _is_false_positive("data/Extras.db", "ssn", "803772792") is False
 
 
 def test_leading_zero_gps_is_false_positive():
@@ -305,8 +321,9 @@ def test_coredata_timestamp_cols_ssn_is_false_positive():
 
 
 def test_freelist_suppressed_when_vacuum_fails():
-    """If VACUUM fails at verification time the freelist finding is suppressed
-    (database is locked — expected for Chrome WAL copies)."""
+    """INVERTED (#4/#26): a locked 'Login Data' copy with deleted rows in free
+    pages must NOT be reported clean. The read-only inspection reads the
+    freelist and reports the finding; the lock never suppresses it."""
     d = tempfile.mkdtemp()
     db_path = Path(d) / "Login Data"
     # Create a database with free pages
@@ -317,23 +334,23 @@ def test_freelist_suppressed_when_vacuum_fails():
     conn.commit()
     conn.execute("DELETE FROM t WHERE id > 5")
     conn.commit()
-    # Keep the connection open to simulate a WAL/Chrome lock — VACUUM will fail
-    # because the connection holds an open read transaction.
+    # Keep the connection open to simulate a WAL/Chrome lock.
     conn.execute("BEGIN")
     conn.execute("SELECT * FROM t LIMIT 1")
     findings = scan_sqlite_freelist(db_path)
     conn.rollback()
     conn.close()
-    # With the lock held, VACUUM fails → finding is suppressed
-    assert len(findings) == 0, (
-        f"Freelist finding should be suppressed when VACUUM is locked, got: {findings}"
+    assert len(findings) >= 1, (
+        f"Locked-DB freelist with recoverable deleted rows must be reported, got: {findings}"
     )
     shutil.rmtree(d, ignore_errors=True)
 
 
 def test_freelist_cleared_by_verification_vacuum():
-    """If free pages exist but VACUUM succeeds at verification time, no finding
-    is reported (the database was cleaned on the spot)."""
+    """INVERTED (#40): verification is READ-ONLY and must NOT VACUUM. Free pages
+    from deleted rows therefore remain and are reported as a finding — the
+    verifier can never mask a sanitizer gap by 'cleaning on the spot'. Also
+    asserts the artifact is not mutated by verification."""
     d = tempfile.mkdtemp()
     db_path = Path(d) / "test_clearable.db"
     conn = sqlite3.connect(str(db_path))
@@ -344,11 +361,180 @@ def test_freelist_cleared_by_verification_vacuum():
     conn.execute("DELETE FROM t WHERE id > 5")
     conn.commit()
     conn.close()
-    # No lock — VACUUM should succeed and clear the freelist
+    before = db_path.stat().st_size
+    free_before = sqlite3.connect(str(db_path)).execute("PRAGMA freelist_count").fetchone()[0]
     findings = scan_sqlite_freelist(db_path)
-    assert len(findings) == 0, (
-        f"Freelist should be cleared by verification-time VACUUM, got: {findings}"
+    free_after = sqlite3.connect(str(db_path)).execute("PRAGMA freelist_count").fetchone()[0]
+    assert len(findings) >= 1, (
+        f"Free pages must be reported, not silently cleared, got: {findings}"
     )
+    # Read-only verification must not have vacuumed the file.
+    assert free_after == free_before > 0, "verification must not clear the freelist"
+    assert db_path.stat().st_size == before, "verification must not rewrite the artifact"
+    shutil.rmtree(d, ignore_errors=True)
+
+
+# ── Fail-closed core: incomplete concept (#4/#22/#23/#24/#40/#41) ─────────────
+
+def test_freelist_unreadable_db_is_incomplete():
+    """A database that cannot be inspected read-only must be recorded as
+    incomplete (fail closed) — never treated as a clean, empty freelist (#41)."""
+    d = tempfile.mkdtemp()
+    bad = Path(d) / "corrupt.db"
+    bad.write_bytes(b"this is definitely not a sqlite database " * 4)
+    incomplete: list = []
+    findings = scan_sqlite_freelist(bad, incomplete=incomplete)
+    assert findings == []
+    assert any(i["check"] == "sqlite_freelist" for i in incomplete), incomplete
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_content_scan_reads_all_rows_not_just_first_1000():
+    """#22: PII stored past the old LIMIT 1000 window must still be found."""
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    db = root / "big.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE t (id INTEGER, note TEXT)")
+    for i in range(2500):
+        conn.execute("INSERT INTO t VALUES (?, ?)", (i, f"row {i} nothing here"))
+    # Well past row 1000:
+    conn.execute("INSERT INTO t VALUES (?, ?)", (99999, "leak victim@example.com"))
+    conn.commit()
+    conn.close()
+    matches = scan_sqlite_content(root)
+    assert any(m.pattern_name == "email" and "victim@example.com" in m.match_text
+               for m in matches), "PII beyond the first 1000 rows must be scanned"
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_content_scan_reads_blob_and_nontext_columns():
+    """#23: text PII stored in a BLOB column and in an INTEGER-declared column
+    must be decoded/scanned — declared affinity must not gate scanning."""
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    db = root / "blob.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE t (id INTEGER, payload BLOB, tag INTEGER)")
+    conn.execute(
+        "INSERT INTO t VALUES (?, ?, ?)",
+        (1, b"contact agent@example.com asap", "SSN 123-45-6789"),
+    )
+    conn.commit()
+    conn.close()
+    matches = scan_sqlite_content(root)
+    names = {m.pattern_name for m in matches}
+    assert "email" in names, f"email in BLOB column was missed: {names}"
+    assert "ssn" in names, f"SSN text in INTEGER-declared column was missed: {names}"
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_content_scan_unreadable_db_is_incomplete():
+    """#41: an unopenable/encrypted database contributes an incomplete entry,
+    not a silent clean pass."""
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "encrypted.db").write_bytes(b"SQLCipher\x00garbage\x01\x02" * 8)
+    incomplete: list = []
+    scan_sqlite_content(root, incomplete=incomplete)
+    assert any(i["check"] == "sqlite_content" for i in incomplete), incomplete
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_oversized_text_file_is_incomplete():
+    """#24: a file over max_file_size is surfaced as incomplete, and its PII is
+    NOT silently reported clean."""
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "huge.log").write_text("PII here: user@example.com " * 4)
+    incomplete: list = []
+    matches = scan_text_files(root, max_file_size=10, incomplete=incomplete)
+    assert any(i["check"] == "text_scan" for i in incomplete), incomplete
+    assert not any(m.pattern_name == "email" for m in matches), (
+        "oversized file must not be scanned-and-passed; it is surfaced as incomplete"
+    )
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_bare_9digit_ssn_in_json_flagged_end_to_end():
+    """#25 end-to-end: a JSON export with a bare 9-digit SSN must FAIL verification."""
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "userdata.json").write_text('{"name": "Test User", "ssn": "123456789"}')
+    result = verify_sanitization(root)
+    assert not result.passed, "bare 9-digit SSN in JSON must be flagged"
+    assert any(m.pattern_name == "ssn" for m in result.pii_matches)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+# ── EXIF fail-closed (#1/#8/#42) ─────────────────────────────────────────────
+
+def test_exif_incomplete_when_exiftool_absent_with_images():
+    """#1/#8/#42: with images present but exiftool missing, EXIF can be neither
+    stripped nor verified — verification must record incomplete and NOT pass."""
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "IMG_0001.jpg").write_bytes(b"\xff\xd8\xff\xe1\x00\x10Exif\x00\x00GPSdata")
+    with patch("hygeia.exif_stripper.find_exiftool", return_value=None):
+        result = verify_sanitization(root)
+    assert any(i["check"] == "exif" for i in result.incomplete), result.incomplete
+    assert result.passed is False, "must not report clean when EXIF was never verified"
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_exif_no_incomplete_when_no_images_present():
+    """No images means nothing to strip/verify — a missing exiftool is not an
+    incomplete in that case."""
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "notes.txt").write_text("nothing sensitive here")
+    with patch("hygeia.exif_stripper.find_exiftool", return_value=None):
+        result = verify_sanitization(root)
+    assert not any(i["check"] == "exif" for i in result.incomplete)
+    assert result.passed is True
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_verify_fails_closed_on_unreadable_database():
+    """End-to-end fail-closed: an unreadable DB in the dump yields zero findings
+    but blocks `passed` via an incomplete entry (#41)."""
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "corrupt.db").write_bytes(b"not a database " * 16)
+    result = verify_sanitization(root)
+    assert result.total_findings == 0
+    assert result.incomplete, "corrupt DB must be recorded incomplete"
+    assert result.passed is False, "must fail closed on an unreadable database"
+    shutil.rmtree(d, ignore_errors=True)
+
+
+# ── Scoped verification is never an unqualified clean (#43) ───────────────────
+
+def test_scoped_verification_records_scope():
+    """#43: --only/--skip narrows the verifier; the scope is recorded so a
+    partial verify is never presented as a full clean."""
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "clean.txt").write_text("nothing sensitive here")
+    V.configure(only=["financial"])
+    try:
+        result = verify_sanitization(root)
+        assert result.scope is not None
+        assert "financial" in result.scope
+    finally:
+        V.configure()  # reset global registry + scope state
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_full_verification_has_no_scope():
+    """An unscoped verify records scope=None (a genuine full-clean candidate)."""
+    V.configure()  # ensure unscoped
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "clean.txt").write_text("nothing sensitive here")
+    result = verify_sanitization(root)
+    assert result.scope is None
+    assert result.passed is True
     shutil.rmtree(d, ignore_errors=True)
 
 

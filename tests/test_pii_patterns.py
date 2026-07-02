@@ -694,6 +694,89 @@ def test_scan_text_clean_no_new_pattern_false_positives():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Audit regex fixes: ip_v6 (#36), gps_coord (#37), credit_card (#38)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_ipv6_matches_compressed_forms():
+    """#36: compressed :: IPv6 (the commonly-logged form) must match."""
+    assert matches_pattern("ip_v6", "fe80::1") != []
+    assert matches_pattern("ip_v6", "2001:db8::ff00:42:8329") != []
+    assert matches_pattern("ip_v6", "::1") != []
+    assert matches_pattern("ip_v6", "client fe80::a1b2:c3d4 connected") != []
+
+
+def test_ipv6_matches_full_form():
+    assert matches_pattern("ip_v6", "2001:0db8:85a3:0000:0000:8a2e:0370:7334") != []
+
+
+def test_ipv6_does_not_match_mac_addresses():
+    """#36: a 6-group MAC (single colons, no ::) must NOT be taken for IPv6."""
+    assert matches_pattern("ip_v6", "00:1A:2B:3C:4D:5E") == []
+    assert matches_pattern("ip_v6", "AA:BB:CC:DD:EE:FF") == []
+    assert matches_pattern("ip_v6", "device AA:BB:CC:DD:EE:FF here") == []
+
+
+def test_gps_matches_single_and_zero_degree():
+    """#37: coordinates with single-digit or zero degrees must match."""
+    assert matches_pattern("gps_coord", "-0.1278") != []
+    assert matches_pattern("gps_coord", "5.6231") != []
+    assert matches_pattern("gps_coord", "1.2345") != []
+
+
+def test_gps_matches_two_and_three_digit_degrees():
+    """Regression: multi-digit-degree coordinates still match after the fix."""
+    assert matches_pattern("gps_coord", "51.5074") != []
+    assert matches_pattern("gps_coord", "-122.4194") != []
+
+
+def test_gps_sub_one_coordinate_not_false_positive():
+    """#37: 0<|val|<1 coordinates must NOT be dropped by _is_false_positive."""
+    assert _is_false_positive("photos/loc.db:T.lat", "gps_coord", "-0.1278") is False
+    assert _is_false_positive("photos/loc.db:T.lon", "gps_coord", "0.5123") is False
+
+
+def test_gps_single_digit_coord_in_json_flagged():
+    """#37 audit scenario: single-digit / sub-1 degree coords in a JSON sidecar
+    must be flagged (the crude 4-decimal suppression is now .plist-only)."""
+    assert _is_false_positive("photos/IMG_0001.json", "gps_coord", "5.6231") is False
+    assert _is_false_positive("photos/IMG_0001.json", "gps_coord", "-0.1278") is False
+
+
+def test_credit_card_matches_spaced_and_hyphenated_amex():
+    """#38: human-readable Amex 4-6-5 grouping must match."""
+    assert matches_pattern("credit_card", "3782 822463 10005") != []
+    assert matches_pattern("credit_card", "3782-822463-10005") != []
+
+
+def test_credit_card_still_matches_contiguous_and_visa():
+    """Regression: contiguous Amex and grouped Visa still match after the fix."""
+    assert matches_pattern("credit_card", "378282246310005") != []
+    assert matches_pattern("credit_card", "4532015112830366") != []
+
+
+def test_scan_text_detects_spaced_amex():
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "wallet.txt").write_text("Amex on file: 3712 345678 90123\n")
+    matches = scan_text_files(root)
+    assert any(m.pattern_name == "credit_card" for m in matches), (
+        f"spaced Amex not detected; got {[m.pattern_name for m in matches]}"
+    )
+    shutil.rmtree(d)
+
+
+def test_scan_text_detects_compressed_ipv6():
+    d = tempfile.mkdtemp()
+    root = Path(d)
+    (root / "net.log").write_text("client fe80::a1b2:c3d4 connected\n")
+    matches = scan_text_files(root)
+    assert any(m.pattern_name == "ip_v6" for m in matches), (
+        f"compressed IPv6 not detected; got {[m.pattern_name for m in matches]}"
+    )
+    shutil.rmtree(d)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Foundation: address JSON keys + CoreData location columns (findings #2, #20)
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -120,3 +120,37 @@ def test_verify_exif_stripped_returns_empty_when_no_exiftool(caplog):
     assert files == []
     warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert any("exiftool" in m for m in warning_msgs)
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed: a missing exiftool must NOT yield a verified-clean run (#1/#8/#42)
+# ---------------------------------------------------------------------------
+
+def test_verification_fails_closed_when_exiftool_absent_with_images():
+    """The audit's #1 scenario: images present but exiftool absent. Because
+    verify_exif_stripped returns [] with no exiftool, the OLD verifier reported
+    a false clean. Verification must now record an EXIF *incomplete* and NOT
+    pass — the GPS-bearing image was never actually checked."""
+    from hygeia.verifier import verify_sanitization
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / "IMG_0001.jpg").write_bytes(b"\xff\xd8\xff\xe1\x00\x10Exif\x00\x00GPS")
+        with patch("hygeia.exif_stripper.find_exiftool", return_value=None):
+            result = verify_sanitization(root)
+    assert any(i.get("check") == "exif" for i in result.incomplete), result.incomplete
+    assert result.passed is False
+
+
+def test_strip_and_verify_without_exiftool_never_reports_clean():
+    """strip_exif_directory returns skipped AND verification records EXIF
+    incomplete — together they must never present as a clean run (#8)."""
+    from hygeia.verifier import verify_sanitization
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / "photo.heic").write_bytes(b"\x00\x00\x00\x18ftypheic-fake-gps")
+        with patch("hygeia.exif_stripper.find_exiftool", return_value=None):
+            strip = strip_exif_directory(root)
+            result = verify_sanitization(root)
+    assert strip.get("skipped") is True
+    assert result.passed is False
+    assert any(i.get("check") == "exif" for i in result.incomplete)
