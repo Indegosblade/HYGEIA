@@ -13,11 +13,14 @@ import io
 import logging
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import zipfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -38,6 +41,7 @@ from hygeia.forensic_cleaner import (
     clean_clipboard_history,
 )
 from hygeia.exif_stripper import verify_exif_stripped
+from hygeia.sqlite_sanitizer import delete_database, _secure_overwrite
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +502,88 @@ class TestCrashReporterCleanup:
             nested = _touch(sub / "deep.ips", b"pii")
             clean_crash_reporter_data(d)
             assert not nested.exists()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# 4b. Secure database deletion (finding #45)
+# ---------------------------------------------------------------------------
+
+class TestSecureDatabaseDeletion:
+
+    def _make_db(self, path: Path, marker: str) -> Path:
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE t (id INTEGER, email TEXT)")
+        conn.execute("INSERT INTO t VALUES (1, ?)", (f"victim-{marker}@example.com",))
+        conn.commit()
+        conn.close()
+        return path
+
+    def test_delete_database_overwrites_bytes_before_unlink(self):
+        """#45: delete_database's 'securely delete' contract requires overwriting
+        the file's bytes BEFORE unlink. Capture the on-disk bytes at the moment
+        unlink is called and assert the PII marker is already destroyed — a plain
+        unlink would leave it carvable in the free blocks."""
+        d = _make_tmp()
+        try:
+            db = self._make_db(d / "secret.db", "UNIQUEMARKER123")
+            assert b"UNIQUEMARKER123" in db.read_bytes()  # present before deletion
+
+            captured = {}
+            real_unlink = Path.unlink
+
+            def capturing_unlink(self_path, *a, **k):
+                if self_path == db and self_path.exists():
+                    captured["at_unlink"] = self_path.read_bytes()
+                return real_unlink(self_path, *a, **k)
+
+            with patch.object(Path, "unlink", capturing_unlink):
+                result = delete_database(db)
+
+            assert not db.exists()
+            assert "at_unlink" in captured, "unlink was never called on the database"
+            assert b"UNIQUEMARKER123" not in captured["at_unlink"], \
+                "file bytes were NOT overwritten before unlink — PII remains carvable"
+            assert db.name in result.get("secure_overwrite", [])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_secure_overwrite_destroys_bytes(self):
+        """#45: _secure_overwrite (used on the DB and its -wal/-shm/-journal
+        companions, which hold 50-95% of deleted-record PII) must replace the
+        whole extent with random bytes so the original PII is unrecoverable."""
+        d = _make_tmp()
+        try:
+            f = d / "companion.db-wal"
+            original = b"deleted rows victim-WALMARK@example.com in wal frames " * 100
+            f.write_bytes(original)
+            size = f.stat().st_size
+
+            ok = _secure_overwrite(f)
+
+            assert ok is True
+            after = f.read_bytes()
+            assert len(after) == size, "overwrite must cover the entire extent"
+            assert b"WALMARK" not in after, "PII bytes not destroyed by secure overwrite"
+            assert after != original
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_secure_overwrite_refuses_symlink(self):
+        """#45 safety: the overwrite must never follow a symlink, or it would
+        clobber a host file the dump points at (outside the output tree)."""
+        d = _make_tmp()
+        try:
+            target = d / "host_file.bin"
+            target.write_bytes(b"IMPORTANT-HOST-DATA")
+            link = d / "link.db"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlinks not supported on this platform")
+            assert _secure_overwrite(link) is False
+            assert target.read_bytes() == b"IMPORTANT-HOST-DATA", "symlink target was clobbered"
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
