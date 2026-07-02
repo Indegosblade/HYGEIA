@@ -693,6 +693,29 @@ def test_scan_text_clean_no_new_pattern_false_positives():
     shutil.rmtree(d)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Foundation: address JSON keys + CoreData location columns (findings #2, #20)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_address_json_keys_present():
+    """CSV/JSON sanitization keys off sensitive_json_keys; address fields must
+    be present so a column/key named 'address'/'city'/'zip' is redacted."""
+    from hygeia.patterns import load_patterns
+    reg = load_patterns()
+    for k in ("address", "street", "city", "zip", "zipcode", "postal_code",
+              "home_address", "employer"):
+        assert k in reg.sensitive_json_keys, f"{k} missing from sensitive_json_keys"
+
+
+def test_coredata_location_columns_present():
+    """The iOS Photos GPS columns use CoreData Z-prefixed names; they must be in
+    sensitive_columns so the generic sanitizer redacts them as a safety net."""
+    from hygeia.patterns import load_patterns
+    reg = load_patterns()
+    for c in ("zlatitude", "zlongitude", "zlocation"):
+        assert c in reg.sensitive_columns, f"{c} missing from sensitive_columns"
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = failed = 0
