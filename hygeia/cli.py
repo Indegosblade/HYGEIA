@@ -379,10 +379,24 @@ def main():
     if not args.skip_verify and not args.dry_run:
         print("[6/7] Verifying sanitization...")
         verification = verify_sanitization(work_path)
+        if verification.scope:
+            print(f"  SCOPED to {verification.scope} — PII outside these categories was NOT checked")
+        if verification.incomplete:
+            print(f"  INCOMPLETE — {len(verification.incomplete)} check(s) could not run (cannot certify clean):")
+            for item in verification.incomplete:
+                print(f"    [{item.get('check', '?')}] {item.get('path', '?')}: {item.get('reason', '')}")
         if verification.passed:
-            print("  PASSED — zero PII findings")
+            if verification.scope:
+                print(f"  PASSED for scoped categories ({verification.scope}) only — NOT a full-clean certification")
+            else:
+                print("  PASSED — zero PII findings")
         else:
-            print(f"  FAILED — {verification.total_findings} findings:")
+            summary_parts = []
+            if verification.total_findings:
+                summary_parts.append(f"{verification.total_findings} findings")
+            if verification.incomplete:
+                summary_parts.append(f"{len(verification.incomplete)} incomplete")
+            print(f"  FAILED — {', '.join(summary_parts)}:")
             if verification.pii_matches:
                 print(f"    PII matches: {len(verification.pii_matches)}")
             if verification.sqlite_freelist_findings:
@@ -414,7 +428,12 @@ def main():
     print(f"Databases sanitized: {manifest['summary']['databases_sanitized']}")
     print(f"Plists sanitized:    {manifest['summary']['plists_sanitized']}")
     print(f"Space freed:         {manifest['summary']['bytes_removed'] / 1024 / 1024:.0f} MB")
-    print(f"Verification:        {'PASSED' if verification.passed else 'FAILED'}")
+    verify_summary = "PASSED" if verification.passed else "FAILED"
+    if verification.incomplete:
+        verify_summary += f" ({len(verification.incomplete)} incomplete check(s))"
+    if verification.scope:
+        verify_summary += f" [scoped to {verification.scope}]"
+    print(f"Verification:        {verify_summary}")
     print(f"Elapsed:             {elapsed:.1f}s")
 
     if args.compliance:
@@ -427,7 +446,12 @@ def main():
     print()
 
     if not verification.passed and not args.dry_run:
-        print("WARNING: Verification FAILED. Review manifest for residual PII.")
+        if verification.incomplete and verification.total_findings == 0:
+            print("WARNING: Verification could NOT be completed "
+                  f"({len(verification.incomplete)} check(s) did not run). "
+                  "Cannot certify the dump clean — review incomplete checks above.")
+        else:
+            print("WARNING: Verification FAILED. Review manifest for residual PII.")
         sys.exit(2)
 
     if args.dry_run:

@@ -17,10 +17,18 @@ from pathlib import Path
 
 from . import sqlite_sanitizer, exif_stripper
 from .patterns import load_patterns, get_default_registry, PatternRegistry
+from .utils import quote_identifier
 
 log = logging.getLogger("hygeia.verifier")
 
 _registry: PatternRegistry | None = None
+
+# Records whether the verifier was narrowed via --only/--skip. A narrowed
+# verify can only see the selected categories, so it can NEVER certify a full
+# clean — verify_sanitization surfaces this as result.scope and the CLI must
+# print it so a scoped run is never mistaken for an unqualified PASSED (#43).
+_scope_only: list[str] | None = None
+_scope_skip: list[str] | None = None
 
 
 def _get_registry() -> PatternRegistry:
@@ -32,8 +40,10 @@ def _get_registry() -> PatternRegistry:
 
 def configure(only: list[str] | None = None, skip: list[str] | None = None):
     """Reconfigure the verifier with specific pattern categories."""
-    global _registry
+    global _registry, _scope_only, _scope_skip
     _registry = load_patterns(only=only, skip=skip)
+    _scope_only = only
+    _scope_skip = skip
 
 
 # Default compiled patterns — exposed for tests and external consumers.
@@ -67,6 +77,14 @@ class VerificationResult:
     pii_matches: list = field(default_factory=list)
     sqlite_freelist_findings: list = field(default_factory=list)
     exif_failures: list = field(default_factory=list)
+    # Checks that could NOT be run to completion (missing tool, unreadable /
+    # locked DB, oversized input). Each entry is {check, path, reason}. A
+    # forensic sanitizer must FAIL CLOSED: an un-run check is not a clean
+    # check, so any incomplete entry blocks `passed`.
+    incomplete: list = field(default_factory=list)
+    # When set, verification was narrowed to these pattern categories via
+    # --only/--skip and therefore did NOT check for PII outside them (#43).
+    scope: str | None = None
     files_scanned: int = 0
     databases_inspected: int = 0
 
@@ -87,30 +105,39 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
     # GPS: valid lat/lon range is -90..90 / -180..180. Larger values are
     # memory sizes, version numbers, or other non-GPS floats.
     if pattern_name == "gps_coord":
+        val = None
         try:
             val = abs(float(match_text))
-            if val > 180.0 or val < 1.0:
+            # Out of the valid lat/long envelope, or an exact zero: not a real
+            # coordinate (memory sizes, version numbers, padding).
+            if val > 180.0 or val == 0.0:
                 return True
-            # Leading-zero integer part (e.g. 07.6100) is a version number,
-            # not a GPS coordinate — real coords have 2-3 digit integer parts.
-            if match_text.lstrip("-").startswith("0") and not match_text.lstrip("-").startswith("0."):
-                return True
+            # NOTE (#37): the old `val < 1.0 -> False positive` rule is REMOVED.
+            # Equatorial latitudes and prime-meridian longitudes (e.g. -0.1278,
+            # 5.6231) legitimately have |val| < 1 and MUST still be flagged.
         except ValueError:
             pass
-        if re.search(r'\.\d{4}$', match_text):
-            if fname.endswith(".plist") or fname.endswith(".json"):
+        # Leading-zero integer part (07.6100, 00.1234) is a version number, not
+        # GPS. A genuine sub-1 coordinate is written "0.xxxx" and is exempt.
+        stripped = match_text.lstrip("-")
+        if stripped.startswith("0") and not stripped.startswith("0."):
+            return True
+        # Layout-metric heuristics apply only to |val| >= 1 magnitudes. A real
+        # sub-1-degree coordinate must bypass them so it is never dropped (#37).
+        if val is None or val >= 1.0:
+            # High-precision floats ending in exactly 4 decimals inside PLIST
+            # files are layout/CSS metrics (e.g. 11.5600, 22.0598), not GPS.
+            # NOTE (#37): this is scoped to .plist ONLY — the old rule also
+            # suppressed .json, which silently discarded real coordinates in
+            # JSON location exports.
+            if fname.endswith(".plist") and re.search(r'\.\d{4}$', match_text):
                 return True
-        # High-precision binary fractions in plist files are layout/CSS metrics,
-        # not GPS coordinates.  Real GPS values stored in plists have at most
-        # 6-7 significant decimal digits; values like 11.56494140625 (11 decimal
-        # places) and 11.45703125 (8 decimal places, power-of-2 fraction) are
-        # computed layout measurements, not geographic data.
-        # Rule: if the file is a .plist and the decimal part has 8 or more
-        # digits, treat it as a layout metric / false positive.
-        if fname.endswith(".plist"):
-            decimal_match = re.search(r'\.(\d+)$', match_text)
-            if decimal_match and len(decimal_match.group(1)) >= 8:
-                return True
+            # >=8 decimal digits in a plist = power-of-2 layout fraction
+            # (11.56494140625, 11.45703125), not geographic data.
+            if fname.endswith(".plist"):
+                decimal_match = re.search(r'\.(\d+)$', match_text)
+                if decimal_match and len(decimal_match.group(1)) >= 8:
+                    return True
         # Noisy column: external_mod_tag is a sync-tag integer, not GPS.
         if col_part.lower() == "external_mod_tag":
             return True
@@ -129,9 +156,12 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
         }
         if col_part.lower() in COREDATA_NOISY_COLS:
             return True
-        if re.match(r'^\d{9}$', match_text):
-            if fname.endswith(".plist") or fname.endswith(".json") or fname.endswith(".sqlitedb") or fname.endswith(".db"):
-                return True
+        # NOTE (#25): the blanket "bare 9-digit SSN in a .json/.plist/.db/
+        # .sqlitedb file is a false positive" suppression is REMOVED. It made a
+        # real unformatted SSN like "123456789" in a JSON export invisible to
+        # the verifier. Genuine CoreData sequence/timestamp integers are still
+        # suppressed above, but ONLY by column name (Z_PK / Z_ENT / timestamp
+        # cols) — never by file extension.
     # IPv4: Apple's 17/8 public infrastructure block and RFC-1918 private
     # ranges are not user-identifying IPs — suppress in verifier only.
     # Also filter addresses where all four octets are single digits — those
@@ -291,8 +321,14 @@ def _scan_context_patterns(text: str, path: str, line_offset: int = 0) -> list[P
     return matches
 
 
-def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024) -> list[PIIMatch]:
-    """Regex scan all text-extractable files for PII patterns."""
+def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024,
+                    incomplete: list | None = None) -> list[PIIMatch]:
+    """Regex scan all text-extractable files for PII patterns.
+
+    Files larger than ``max_file_size`` cannot be loaded for scanning, so —
+    fail closed — they are recorded as an ``incomplete`` entry rather than
+    silently skipped as if clean (#24).
+    """
     matches = []
     scanned = 0
 
@@ -305,14 +341,13 @@ def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024) -> l
             continue
         if f.suffix.lower() not in TEXT_SCANNABLE:
             continue
-        if f.stat().st_size > max_file_size:
-            continue
 
         # Skip HYGEIA-generated output files
         if f.name.lower() in HYGEIA_OUTPUT_FILES:
             continue
 
-        # Skip system directories (too many false positives)
+        # Skip system directories (too many false positives). Done BEFORE the
+        # size check so an oversized system file is not spuriously flagged.
         rel_path = str(f.relative_to(dump_path)).replace("\\", "/")
         skip = False
         for fp in FALSE_POSITIVE_PATHS:
@@ -320,6 +355,25 @@ def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024) -> l
                 skip = True
                 break
         if skip:
+            continue
+
+        # Oversized files cannot be loaded for scanning: fail closed by
+        # recording an incomplete entry rather than silently passing them (#24).
+        try:
+            size = f.stat().st_size
+        except OSError:
+            size = -1
+        if size > max_file_size:
+            if incomplete is not None:
+                incomplete.append({
+                    "check": "text_scan",
+                    "path": rel_path,
+                    "reason": (
+                        f"file is {size} bytes (> max_file_size {max_file_size}); "
+                        f"NOT scanned for PII — cannot certify clean"
+                    ),
+                })
+            log.warning(f"{rel_path}: {size} bytes exceeds scan cap — recorded incomplete")
             continue
 
         try:
@@ -340,121 +394,209 @@ def scan_text_files(dump_path: Path, max_file_size: int = 10 * 1024 * 1024) -> l
     return matches
 
 
-def scan_sqlite_freelist(db_path: Path) -> list[str]:
+def _ro_uri(db_path: Path) -> str:
+    """Build a read-only SQLite URI for ``db_path``.
+
+    Verification is a read-only audit of the delivered artifact — it must never
+    mutate the file it is checking (#40). ``mode=ro`` enforces that at the SQLite
+    layer, and ``Path.as_uri()`` percent-encodes spaces/specials (e.g. Chrome's
+    "Login Data") so the URI is well-formed cross-platform.
     """
-    Check SQLite database free pages for recoverable PII.
-    After VACUUM, there should be zero free pages.
+    return db_path.resolve().as_uri() + "?mode=ro"
 
-    If free pages are found, attempt an in-place VACUUM at verification time
-    as a last-resort cleanup.  If VACUUM is still blocked (e.g. Chrome holds
-    a WAL lock on "Login Data" even after the file is copied), log a WARNING
-    but do NOT add it to findings — the freelist is expected for databases that
-    cannot be vacuumed due to an OS-level lock and does not represent a
-    sanitization gap.
+
+def _coerce_to_text(value) -> str | None:
+    """Best-effort decode of a SQLite cell value to text for PII matching.
+
+    SQLite is dynamically typed, so a column of any declared affinity can hold
+    strings or BLOBs that carry text PII (#23). BLOB/bytes values are decoded
+    utf-8 (errors ignored) before matching. Pure numeric cells are not text and
+    are not scanned.
     """
-    findings = []
-    try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA freelist_count")
-        free_pages = cursor.fetchone()[0]
-
-        cursor.execute("PRAGMA page_count")
-        total_pages = cursor.fetchone()[0]
-        conn.close()
-
-        if free_pages <= 0:
-            return findings
-
-        log.warning(f"{db_path.name}: {free_pages}/{total_pages} free pages — attempting verification-time VACUUM")
-
-        # Attempt VACUUM to clear the freelist now.
-        vacuumed = False
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
         try:
-            vconn = sqlite3.connect(str(db_path))
-            vconn.execute("VACUUM")
-            vconn.close()
-            vacuumed = True
-        except sqlite3.OperationalError:
-            pass
+            return bytes(value).decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+    return None
 
-        if vacuumed:
-            # Re-check: if freelist is now 0, no finding needed.
-            try:
-                vconn2 = sqlite3.connect(str(db_path))
-                remaining = vconn2.execute("PRAGMA freelist_count").fetchone()[0]
-                vconn2.close()
-                if remaining == 0:
-                    log.info(f"{db_path.name}: verification-time VACUUM cleared freelist — no finding")
-                    return findings
-            except sqlite3.Error:
-                pass
-            findings.append(f"{db_path.name}: {free_pages} free pages (may contain recoverable data)")
-        else:
-            # VACUUM failed — database is locked (e.g. Chrome WAL lock on
-            # "Login Data").  The freelist is an expected artefact of the lock,
-            # not a sanitization failure.  Log it as a warning only.
-            log.warning(
-                f"{db_path.name}: VACUUM failed at verification time (database locked — "
-                f"likely Chrome WAL); freelist finding suppressed"
-            )
 
+def scan_sqlite_freelist(db_path: Path, incomplete: list | None = None) -> list[str]:
+    """
+    Inspect SQLite free pages for recoverable (deleted-row) PII.
+
+    Verification is READ-ONLY (#40): this opens the database ``mode=ro`` and
+    does NOT run VACUUM. Free pages retain the byte images of deleted rows,
+    directly carveable by forensic tools, so any non-empty freelist is a
+    FINDING — it is never suppressed just because the database happens to be
+    locked (#4/#26). If the database cannot even be opened/inspected read-only,
+    that is recorded as an ``incomplete`` entry (fail closed, #41) — never
+    silently treated as clean.
+    """
+    findings: list[str] = []
+
+    try:
+        conn = sqlite3.connect(_ro_uri(db_path), uri=True)
+    except sqlite3.Error as e:
+        log.warning(f"Cannot open {db_path} read-only for freelist inspection: {e}")
+        if incomplete is not None:
+            incomplete.append({
+                "check": "sqlite_freelist",
+                "path": str(db_path),
+                "reason": f"database could not be opened read-only for freelist inspection: {e}",
+            })
+        return findings
+
+    try:
+        cursor = conn.cursor()
+        free_pages = cursor.execute("PRAGMA freelist_count").fetchone()[0]
+        total_pages = cursor.execute("PRAGMA page_count").fetchone()[0]
     except sqlite3.Error as e:
         log.warning(f"Cannot inspect freelist of {db_path}: {e}")
+        if incomplete is not None:
+            incomplete.append({
+                "check": "sqlite_freelist",
+                "path": str(db_path),
+                "reason": f"freelist could not be read (locked/corrupt/encrypted): {e}",
+            })
+        return findings
+    finally:
+        conn.close()
+
+    if free_pages and free_pages > 0:
+        log.warning(f"{db_path.name}: {free_pages}/{total_pages} free pages — recoverable deleted-row PII")
+        findings.append(
+            f"{db_path.name}: {free_pages} free pages (may contain recoverable deleted-row data)"
+        )
 
     return findings
 
 
-def scan_sqlite_content(dump_path: Path) -> list[PIIMatch]:
-    """Scan SQLite database text columns for residual PII after sanitization."""
-    matches = []
+def _scan_sqlite_column(cursor, db, dump_path, table, col_name,
+                        matches: list, incomplete: list | None) -> None:
+    """Scan every non-NULL value of one column for residual PII.
+
+    Reads ALL rows in bounded ``fetchmany`` batches (#22 — no LIMIT window) and
+    decodes BLOB/bytes values to text before matching (#23). Any read failure is
+    surfaced as ``incomplete`` — never silently skipped.
+    """
+    rel = str(db.relative_to(dump_path))
+    qualified_path = f"{rel}:{table}.{col_name}"
+    qt, qc = quote_identifier(table), quote_identifier(col_name)
+
+    # Prefer rowid for forensic locability; fall back for WITHOUT ROWID / virtual
+    # tables that have no rowid.
+    has_rowid = True
+    try:
+        cursor.execute(f"SELECT rowid, {qc} FROM {qt} WHERE {qc} IS NOT NULL")
+    except sqlite3.Error:
+        try:
+            cursor.execute(f"SELECT {qc} FROM {qt} WHERE {qc} IS NOT NULL")
+            has_rowid = False
+        except sqlite3.Error as e:
+            if incomplete is not None:
+                incomplete.append({
+                    "check": "sqlite_content",
+                    "path": qualified_path,
+                    "reason": f"column could not be read for PII scan: {e}",
+                })
+            return
+
+    reg = _get_registry()
+    row_index = 0
+    while True:
+        try:
+            batch = cursor.fetchmany(1000)
+        except sqlite3.Error as e:
+            if incomplete is not None:
+                incomplete.append({
+                    "check": "sqlite_content",
+                    "path": qualified_path,
+                    "reason": f"row read failed partway through PII scan: {e}",
+                })
+            return
+        if not batch:
+            return
+        for row in batch:
+            row_index += 1
+            if has_rowid:
+                rowid, value = row[0], row[1]
+            else:
+                rowid, value = row_index, row[0]
+            text = _coerce_to_text(value)
+            if text is None:
+                continue
+            for name, pattern in reg.regex_patterns.items():
+                for m in pattern.finditer(text):
+                    if not _is_false_positive(qualified_path, name, m.group()):
+                        matches.append(PIIMatch(qualified_path, name, m.group(), rowid))
+            ctx = _scan_context_patterns(text, qualified_path)
+            for cm in ctx:
+                cm.line_number = rowid
+            matches.extend(ctx)
+
+
+def scan_sqlite_content(dump_path: Path, incomplete: list | None = None) -> list[PIIMatch]:
+    """Scan SQLite database contents for residual PII after sanitization.
+
+    Opens each database READ-ONLY (#40) and scans EVERY column regardless of
+    declared affinity (#23) across ALL rows (#22). A database that cannot be
+    opened or whose schema cannot be read is recorded as ``incomplete`` — an
+    unreadable database is never reported clean (#41).
+    """
+    matches: list = []
     databases = sqlite_sanitizer.find_all_databases(dump_path)
 
     for db in databases:
         try:
-            conn = sqlite3.connect(str(db))
+            conn = sqlite3.connect(_ro_uri(db), uri=True)
+        except sqlite3.Error as e:
+            log.warning(f"Cannot open {db} read-only for content scan: {e}")
+            if incomplete is not None:
+                incomplete.append({
+                    "check": "sqlite_content",
+                    "path": str(db),
+                    "reason": f"database could not be opened read-only for PII content scan: {e}",
+                })
+            continue
+
+        try:
             cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-            tables = [row[0] for row in cursor.fetchall()]
+            try:
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                )
+                tables = [row[0] for row in cursor.fetchall()]
+            except sqlite3.Error as e:
+                if incomplete is not None:
+                    incomplete.append({
+                        "check": "sqlite_content",
+                        "path": str(db),
+                        "reason": f"table list could not be read (locked/corrupt/encrypted): {e}",
+                    })
+                continue
 
             for table in tables:
                 try:
-                    cursor.execute(f"PRAGMA table_info(\"{table}\")")
+                    cursor.execute(f"PRAGMA table_info({quote_identifier(table)})")
                     columns = cursor.fetchall()
-                except sqlite3.Error:
+                except sqlite3.Error as e:
+                    if incomplete is not None:
+                        incomplete.append({
+                            "check": "sqlite_content",
+                            "path": f"{db}:{table}",
+                            "reason": f"table schema could not be read: {e}",
+                        })
                     continue
 
-                text_cols = [
-                    c[1] for c in columns
-                    if any(x in (c[2] or "").upper() for x in ("TEXT", "VARCHAR", "CHAR", "CLOB"))
-                    or (c[2] or "") == ""
-                ]
-                for col_name in text_cols:
-                    try:
-                        cursor.execute(f"SELECT rowid, \"{col_name}\" FROM \"{table}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 1000")
-                        for rowid, value in cursor.fetchall():
-                            if not isinstance(value, str):
-                                continue
-                            rel = str(db.relative_to(dump_path))
-                            qualified_path = f"{rel}:{table}.{col_name}"
-                            for name, pattern in _get_registry().regex_patterns.items():
-                                for m in pattern.finditer(value):
-                                    if not _is_false_positive(qualified_path, name, m.group()):
-                                        matches.append(PIIMatch(
-                                            qualified_path,
-                                            name, m.group(), rowid
-                                        ))
-                            # Context patterns on the column value
-                            ctx = _scan_context_patterns(value, qualified_path)
-                            for cm in ctx:
-                                cm.line_number = rowid
-                            matches.extend(ctx)
-                    except sqlite3.Error:
-                        continue
-
+                # Scan ALL columns regardless of declared affinity (#23).
+                for col in columns:
+                    _scan_sqlite_column(cursor, db, dump_path, table, col[1],
+                                        matches, incomplete)
+        finally:
             conn.close()
-        except sqlite3.Error:
-            continue
 
     return matches
 
@@ -469,34 +611,68 @@ def verify_sanitization(dump_path: Path) -> VerificationResult:
     """
     result = VerificationResult()
 
+    # A narrowed verify (--only/--skip) cannot see PII outside the selected
+    # categories, so record the scope; the CLI must never present it as a full
+    # clean (#43).
+    if _scope_only or _scope_skip:
+        result.scope = ", ".join(sorted(_get_registry().active_categories)) or "(none)"
+
     log.info(f"Starting verification of {dump_path}")
 
-    # 1. Text file PII scan
-    result.pii_matches = scan_text_files(dump_path)
+    # 1. Text file PII scan (oversized files -> incomplete)
+    result.pii_matches = scan_text_files(dump_path, incomplete=result.incomplete)
 
-    # 2. SQLite content PII scan
-    db_pii = scan_sqlite_content(dump_path)
+    # 2. SQLite content PII scan (unreadable DBs -> incomplete)
+    db_pii = scan_sqlite_content(dump_path, incomplete=result.incomplete)
     result.pii_matches.extend(db_pii)
     if db_pii:
         log.info(f"SQLite content scan: {len(db_pii)} PII matches in database content")
 
-    # 3. SQLite freelist inspection
+    # 3. SQLite freelist inspection (uninspectable DBs -> incomplete)
     databases = sqlite_sanitizer.find_all_databases(dump_path)
     result.databases_inspected = len(databases)
     for db in databases:
-        findings = scan_sqlite_freelist(db)
+        findings = scan_sqlite_freelist(db, incomplete=result.incomplete)
         result.sqlite_freelist_findings.extend(findings)
 
-    # 4. EXIF verification
-    files_with_exif = exif_stripper.verify_exif_stripped(dump_path)
-    result.exif_failures = [str(f.relative_to(dump_path)) for f in files_with_exif]
+    # 4. EXIF verification. Without exiftool the images can be neither stripped
+    #    nor verified — surface that as incomplete instead of reporting a false
+    #    clean (#1/#8/#42). With exiftool present, residual-EXIF images are
+    #    ordinary findings.
+    if exif_stripper.find_exiftool() is None:
+        image_files = [
+            f for f in dump_path.rglob("*")
+            if f.is_file() and f.suffix.lower() in exif_stripper.IMAGE_EXTENSIONS
+        ]
+        if image_files:
+            log.warning(
+                f"exiftool not installed — {len(image_files)} image(s) could not be "
+                f"verified for residual EXIF/GPS metadata"
+            )
+            result.incomplete.append({
+                "check": "exif",
+                "path": str(dump_path),
+                "reason": (
+                    f"exiftool not installed — {len(image_files)} image(s) were neither "
+                    f"stripped nor verified for residual EXIF/GPS metadata"
+                ),
+            })
+    else:
+        files_with_exif = exif_stripper.verify_exif_stripped(dump_path)
+        result.exif_failures = [str(f.relative_to(dump_path)) for f in files_with_exif]
 
-    result.passed = result.total_findings == 0
+    # FAIL CLOSED: a clean result requires zero findings AND that every check
+    # actually ran to completion.
+    result.passed = result.total_findings == 0 and not result.incomplete
 
-    status = "PASSED" if result.passed else f"FAILED ({result.total_findings} findings)"
+    status = "PASSED" if result.passed else (
+        f"FAILED ({result.total_findings} findings, {len(result.incomplete)} incomplete)"
+    )
     log.info(f"Verification {status}: "
              f"{len(result.pii_matches)} PII, "
              f"{len(result.sqlite_freelist_findings)} freelist, "
-             f"{len(result.exif_failures)} EXIF")
+             f"{len(result.exif_failures)} EXIF, "
+             f"{len(result.incomplete)} incomplete"
+             + (f", scope={result.scope}" if result.scope else ""))
 
     return result

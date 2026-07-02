@@ -95,8 +95,8 @@
       "description": "Geographic and location data",
       "patterns": {
         "gps_coord": {
-          "regex": "-?\\d{2,3}\\.\\d{4,}",
-          "description": "GPS coordinates (latitude/longitude with 4+ decimal places)",
+          "regex": "-?\\d{1,3}\\.\\d{4,}",
+          "description": "GPS coordinates (latitude/longitude with 1-3 integer digits and 4+ decimal places)",
           "flags": []
         },
         "ip_v4": {
@@ -105,8 +105,8 @@
           "flags": []
         },
         "ip_v6": {
-          "regex": "\\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\\b",
-          "description": "IPv6 addresses (full 8-group notation)",
+          "regex": "(?<![0-9A-Fa-f:])(?:(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:(?::[0-9A-Fa-f]{1,4}){1,6}|:(?:(?::[0-9A-Fa-f]{1,4}){1,7}|:))(?![0-9A-Fa-f:])",
+          "description": "IPv6 addresses (full 8-group and compressed :: notation; excludes MAC addresses)",
           "flags": []
         },
         "mac_addr": {
@@ -120,8 +120,8 @@
       "description": "Financial identifiers — cards, bank accounts, tax IDs",
       "patterns": {
         "credit_card": {
-          "regex": "\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2})|3(?:0[0-5]|[68]\\d)\\d|(?:2131|1800|35\\d{2})|62\\d{2})[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{3,4}(?:[- ]?\\d{3})?\\b",
-          "description": "Credit cards (Visa, MC, Amex, Discover, Diners, JCB, UnionPay)",
+          "regex": "\\b(?:3[47]\\d{2}[- ]\\d{6}[- ]\\d{5}|(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2})|3(?:0[0-5]|[68]\\d)\\d|(?:2131|1800|35\\d{2})|62\\d{2})[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{3,4}(?:[- ]?\\d{3})?)\\b",
+          "description": "Credit cards (Visa, MC, Amex incl. spaced/hyphenated 4-6-5 grouping, Discover, Diners, JCB, UnionPay)",
           "flags": []
         },
         "iban": {
