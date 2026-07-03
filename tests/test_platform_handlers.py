@@ -422,6 +422,132 @@ class TestiOSHandlers:
         assert _count_rows(db, "canonical_addresses") == 0
 
 
+class TestPhotosIOSHandler:
+    """
+    Regression coverage for audit finding #2 (CRITICAL): the photos_ios
+    detection signature used to require BOTH ZASSET and ZGENERICASSET as
+    base tables. A real Photos.sqlite never has both -- iOS <=13 names the
+    asset table ZGENERICASSET, iOS 14+ renamed it to ZASSET -- so detection
+    never fired on any real device, _handle_photos_ios never ran, and GPS
+    coordinates in ZLATITUDE/ZLONGITUDE fell through to the generic
+    sanitizer, which never scans FLOAT-typed columns. Net effect: every
+    photo's home/work GPS coordinates survived in the "sanitized" database.
+    """
+
+    @staticmethod
+    def _make_photos_db(tmp_path: Path, asset_table: str) -> Path:
+        """
+        Build a minimal Photos.sqlite with only ONE of the two possible
+        asset-table names (mirroring a real device, which never has both),
+        holding one row with real GPS coordinates and one row with no
+        location fix at all.
+        """
+        db_path = tmp_path / "Photos.sqlite"
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            f'CREATE TABLE "{asset_table}" ('
+            "Z_PK INTEGER PRIMARY KEY, ZLATITUDE FLOAT, ZLONGITUDE FLOAT, "
+            "ZFILENAME TEXT)"
+        )
+        conn.execute(
+            f'INSERT INTO "{asset_table}" VALUES '
+            "(1, 37.7749, -122.4194, 'IMG_0001.HEIC')"
+        )
+        conn.execute(
+            f'INSERT INTO "{asset_table}" VALUES '
+            "(2, NULL, NULL, 'IMG_0002.HEIC')"
+        )
+        conn.commit()
+        conn.close()
+        return db_path
+
+    def test_detect_fires_on_zasset_only_ios14_schema(self, tmp_path):
+        """iOS 14+ schema (only ZASSET) must be detected as photos_ios."""
+        db = self._make_photos_db(tmp_path, "ZASSET")
+        assert detect_database_type(db) == "photos_ios"
+
+    def test_detect_fires_on_zgenericasset_only_ios13_schema(self, tmp_path):
+        """iOS <=13 schema (only ZGENERICASSET) must be detected as photos_ios."""
+        db = self._make_photos_db(tmp_path, "ZGENERICASSET")
+        assert detect_database_type(db) == "photos_ios"
+
+    def test_gps_coordinates_cleared_on_ios14_schema(self, tmp_path):
+        """
+        The audit's exact failure scenario: an iOS 16 Photos.sqlite with
+        only ZASSET present. The handler must trigger (not silently fall
+        through to the generic sanitizer) and must clear the float GPS
+        columns -- not just leave them because they aren't strings.
+        """
+        db = self._make_photos_db(tmp_path, "ZASSET")
+
+        assert detect_database_type(db) == "photos_ios", (
+            "detection must fire on ZASSET alone -- ZGENERICASSET never "
+            "coexists with it on a real device"
+        )
+
+        result = run_platform_handler(db, "photos_ios")
+        assert result["platform"] == "photos_ios"
+        assert "error" not in result
+
+        conn = sqlite3.connect(str(db))
+        with_fix = conn.execute(
+            'SELECT ZLATITUDE, ZLONGITUDE, typeof(ZLATITUDE) '
+            'FROM "ZASSET" WHERE Z_PK = 1'
+        ).fetchone()
+        without_fix = conn.execute(
+            'SELECT ZLATITUDE, ZLONGITUDE FROM "ZASSET" WHERE Z_PK = 2'
+        ).fetchone()
+        conn.close()
+
+        # The recoverable home/work coordinates must be gone, not merely
+        # skipped because they were floats rather than strings.
+        assert with_fix[0] != 37.7749
+        assert with_fix[1] != -122.4194
+        assert with_fix[0] == "[GPS_REMOVED]"
+        assert with_fix[1] == "[GPS_REMOVED]"
+        # A row that never had a location fix is left alone (NULL, not "fixed").
+        assert without_fix == (None, None)
+
+    def test_gps_coordinates_cleared_on_legacy_ios13_schema(self, tmp_path):
+        """Same failure scenario, but on the pre-iOS-14 ZGENERICASSET name."""
+        db = self._make_photos_db(tmp_path, "ZGENERICASSET")
+
+        assert detect_database_type(db) == "photos_ios"
+        result = run_platform_handler(db, "photos_ios")
+        assert result["platform"] == "photos_ios"
+        assert "error" not in result
+
+        conn = sqlite3.connect(str(db))
+        row = conn.execute(
+            'SELECT ZLATITUDE, ZLONGITUDE FROM "ZGENERICASSET" WHERE Z_PK = 1'
+        ).fetchone()
+        conn.close()
+        assert row == ("[GPS_REMOVED]", "[GPS_REMOVED]")
+
+    def test_end_to_end_via_sanitize_with_platform_detection(self, tmp_path):
+        """
+        The real pipeline entry point (cli.py) calls
+        sanitize_with_platform_detection, not detect_database_type or
+        run_platform_handler directly. It must also route an iOS 14+ dump
+        through the photos_ios handler instead of silently falling back to
+        the generic sanitizer that cannot see FLOAT columns.
+        """
+        db = self._make_photos_db(tmp_path, "ZASSET")
+
+        result = sanitize_with_platform_detection(db)
+
+        assert result["platform_detected"] is True
+        assert result["platform"] == "photos_ios"
+
+        conn = sqlite3.connect(str(db))
+        lat, lon = conn.execute(
+            'SELECT ZLATITUDE, ZLONGITUDE FROM "ZASSET" WHERE Z_PK = 1'
+        ).fetchone()
+        conn.close()
+        assert lat != 37.7749
+        assert lon != -122.4194
+
+
 # ---------------------------------------------------------------------------
 # 3. Result structure tests
 # ---------------------------------------------------------------------------
