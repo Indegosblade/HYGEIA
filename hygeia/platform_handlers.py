@@ -27,6 +27,7 @@ from .sqlite_sanitizer import (
     sanitize_database_generic,
     is_sqlite_database,
 )
+from .utils import quote_identifier
 
 log = logging.getLogger("hygeia.platform_handlers")
 
@@ -36,7 +37,10 @@ log = logging.getLogger("hygeia.platform_handlers")
 # ---------------------------------------------------------------------------
 
 # Map of (required_tables, optional_tables_that_boost_confidence) -> db_type
-# A DB type matches when ALL required tables exist.
+# A DB type matches when ALL tables in the entry's required set exist. Most
+# entries list several tables because that's how many a real schema always
+# has together. Some entries deliberately use a single-table set as an "OR"
+# arm — see the photos_ios comment below for why that matters.
 _DETECTION_SIGNATURES: list[tuple[frozenset, str]] = [
     # Chrome — order matters: more-specific checks first
     (frozenset({"logins", "insecure_credentials"}), "chrome_login"),
@@ -50,7 +54,16 @@ _DETECTION_SIGNATURES: list[tuple[frozenset, str]] = [
     # iOS
     (frozenset({"ABPerson", "ABMultiValue"}), "contacts_ios"),
     (frozenset({"message", "chat", "handle"}), "messages_ios"),
-    (frozenset({"ZASSET", "ZGENERICASSET"}), "photos_ios"),
+    # Photos.sqlite: iOS <=13 names the asset table ZGENERICASSET; iOS 14+
+    # renamed it to ZASSET. The two never coexist as base tables in a real
+    # dump, so requiring BOTH (the original frozenset({"ZASSET",
+    # "ZGENERICASSET"}) signature) never matched any real device and GPS
+    # coordinates silently fell through to the generic sanitizer, which
+    # skips FLOAT columns entirely (audit finding #2). Two single-table
+    # entries make this an OR: either table alone is enough to identify the
+    # database and run the photos_ios handler.
+    (frozenset({"ZASSET"}), "photos_ios"),
+    (frozenset({"ZGENERICASSET"}), "photos_ios"),
     (frozenset({"samples", "quantity_samples", "objects"}), "health_ios"),
     (frozenset({"history_items", "history_visits"}), "safari_history"),
     (frozenset({"bookmarks", "folders"}), "safari_bookmarks"),
@@ -126,10 +139,11 @@ def _delete_tables(conn: sqlite3.Connection, tables_to_clear: list[str]) -> tupl
     for t in tables_to_clear:
         if t.lower() not in existing:
             continue
+        qtable = quote_identifier(t)
         try:
-            cursor.execute(f'SELECT COUNT(*) FROM "{t}"')
+            cursor.execute(f'SELECT COUNT(*) FROM {qtable}')
             count = cursor.fetchone()[0]
-            cursor.execute(f'DELETE FROM "{t}"')
+            cursor.execute(f'DELETE FROM {qtable}')
             cleared.append(t)
             total += count
         except sqlite3.Error as e:
@@ -153,8 +167,9 @@ def _redact_columns(
     if table.lower() not in existing:
         return 0
 
+    qtable = quote_identifier(table)
     # Get actual column names (preserve case)
-    cursor.execute(f'PRAGMA table_info("{table}")')
+    cursor.execute(f'PRAGMA table_info({qtable})')
     actual_cols = {row[1].lower(): row[1] for row in cursor.fetchall()}
 
     total = 0
@@ -162,10 +177,11 @@ def _redact_columns(
         actual = actual_cols.get(col.lower())
         if actual is None:
             continue
+        qcol = quote_identifier(actual)
         try:
             cursor.execute(
-                f'UPDATE "{table}" SET "{actual}" = ? '
-                f'WHERE "{actual}" IS NOT NULL AND "{actual}" != ""',
+                f'UPDATE {qtable} SET {qcol} = ? '
+                f'WHERE {qcol} IS NOT NULL AND {qcol} != ""',
                 (redact_value,),
             )
             total += max(0, cursor.rowcount)
