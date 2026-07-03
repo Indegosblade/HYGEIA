@@ -25,6 +25,25 @@ from .utils import resolve_within, safe_utime
 from .utils import sha256 as _sha256
 
 
+def _safe_rglob(root):
+    """Recursively yield paths under ``root``, tolerating entries that vanish
+    mid-walk. forensic_clean_all runs cleaning subtasks in parallel over the
+    SAME tree, so a sibling subtask deleting a directory must not crash another
+    subtask's walk with FileNotFoundError (finding #34)."""
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        yield entry
+        try:
+            recurse = entry.is_dir() and not entry.is_symlink()
+        except OSError:
+            recurse = False
+        if recurse:
+            yield from _safe_rglob(entry)
+
+
 def _safe_utime_any(path: Path, root: Path, times: tuple[float, float]) -> bool:
     """Symlink-safe utime for a file OR a directory.
 
@@ -153,7 +172,7 @@ def _collect_leveldb_dirs(dump_path):
         found.append(store_dir)
 
     # Strategy A: walk every directory, check name patterns and CURRENT
-    for dirpath in dump_path.rglob("*"):
+    for dirpath in _safe_rglob(dump_path):
         if not dirpath.is_dir():
             continue
         if _is_leveldb_dir(dirpath):
@@ -212,7 +231,7 @@ def clean_thumbnail_caches(dump_path, dry_run=False):
     actions = []
     deleted_dirs = []
 
-    all_paths = sorted(dump_path.rglob("*"), key=lambda x: len(x.parts))
+    all_paths = sorted(_safe_rglob(dump_path), key=lambda x: len(x.parts))
     for dirpath in all_paths:
         if not dirpath.is_dir():
             continue
@@ -227,7 +246,7 @@ def clean_thumbnail_caches(dump_path, dry_run=False):
                 deleted_dirs.append(dirpath)
                 actions.append({"action": "delete_cache_dir", "path": rel})
                 log.info(f"Deleted cache dir: {rel}")
-    for fp in list(dump_path.rglob("*")):
+    for fp in list(_safe_rglob(dump_path)):
         if not fp.is_file():
             continue
         if _inside_deleted(fp, deleted_dirs):
@@ -283,7 +302,7 @@ def _is_swap_file(name):
 
 def clean_swap_temp_files(dump_path, dry_run=False):
     actions = []
-    for fp in list(dump_path.rglob("*")):
+    for fp in list(_safe_rglob(dump_path)):
         if not fp.is_file():
             continue
         if _is_swap_file(fp.name):
@@ -320,7 +339,7 @@ def normalize_timestamps(dump_path, epoch="2000-01-01"):
     epoch_ts = dt.timestamp()
     normalized = 0
     errors = 0
-    for fp in list(dump_path.rglob("*")):
+    for fp in list(_safe_rglob(dump_path)):
         if _safe_utime_any(fp, dump_path, (epoch_ts, epoch_ts)):
             normalized += 1
         else:
@@ -373,7 +392,7 @@ def clean_quarantine_xattrs(dump_path, dry_run=False):
         log.debug("clean_quarantine_xattrs: os.listxattr/removexattr not available, skipping")
         return actions
 
-    for fp in list(dump_path.rglob("*")):
+    for fp in list(_safe_rglob(dump_path)):
         try:
             xattrs = listxattr(str(fp), follow_symlinks=False)
         except (OSError, ValueError):
@@ -488,7 +507,7 @@ def clean_crash_reporter_data(dump_path, dry_run=False):
 
     # Walk directories first (sorted by depth so parents are processed before children)
     all_dirs = sorted(
-        (p for p in dump_path.rglob("*") if p.is_dir()),
+        (p for p in _safe_rglob(dump_path) if p.is_dir()),
         key=lambda x: len(x.parts),
     )
     for dirpath in all_dirs:
@@ -514,7 +533,7 @@ def clean_crash_reporter_data(dump_path, dry_run=False):
             log.info(f"Deleted crash reporter dir: {rel}")
 
     # Then individual .ips / .crash files
-    for fp in list(dump_path.rglob("*")):
+    for fp in list(_safe_rglob(dump_path)):
         if not fp.is_file():
             continue
         if _inside_deleted(fp, deleted_dirs):
