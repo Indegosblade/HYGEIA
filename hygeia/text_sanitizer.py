@@ -48,8 +48,25 @@ SHELL_HISTORY_FILES = {
 
 LOG_EXTENSIONS = {".log", ".txt", ".ips", ".crash", ".xml"}
 
+# Size caps for text-file sanitization, by file class. A file over its cap
+# cannot be safely loaded and redacted here, but it must never simply vanish
+# from the run with no trace — see _partition_by_size and #21.
+JSON_SIZE_LIMIT = 50 * 1024 * 1024
+LOG_SIZE_LIMIT = 10 * 1024 * 1024
+CSV_SIZE_LIMIT = 50 * 1024 * 1024
+
 
 def _is_sensitive_json_key(key: str) -> bool:
+    """True if a JSON key name itself indicates the value is PII.
+
+    ``reg.sensitive_json_keys`` is the registry's full key-name set, which
+    includes the 'address' category (address/street/city/zip/zipcode/
+    postal_code/street_address/home_address/employer/organization/...).
+    Honoring it generically here — rather than matching a hardcoded list of
+    category names — is what makes an 'address'/'city'/'zip'/'home_address'
+    JSON key redact its value without this module needing to know the
+    category exists (#20).
+    """
     key_lower = key.lower()
     if key_lower in SAFE_JSON_KEYS:
         return False
@@ -59,14 +76,69 @@ def _is_sensitive_json_key(key: str) -> bool:
     )
 
 
+def _context_matches(text: str, pos_start: int, pos_end: int,
+                      keywords: set[str], window: int) -> bool:
+    """Return True if any keyword appears within `window` chars of [pos_start, pos_end].
+
+    Mirrors verifier._context_matches so this module redacts exactly what the
+    verifier would otherwise flag as a residual context-pattern finding (#19).
+    """
+    lo = max(0, pos_start - window)
+    hi = min(len(text), pos_end + window)
+    surrounding = text[lo:hi].lower()
+    return any(kw.lower() in surrounding for kw in keywords)
+
+
+def _redact_context_patterns_in_string(text: str) -> tuple[str, list[str]]:
+    """Apply keyword-gated context patterns to a string.
+
+    The registry keeps an entire class of high-value detectors exclusively in
+    ``context_patterns`` — date_of_birth, password_kv, drivers_license,
+    us_passport, canadian_sin, australian_tfn, aws_secret_key,
+    us_routing_number, npi, and more. ``date_of_birth`` and ``password_kv``
+    have no standalone ``regex_patterns`` counterpart at all, so without this
+    a DOB or a plaintext ``password=...`` in a JSON value, log line, or CSV
+    cell passed straight through untouched (#19). A context pattern only
+    fires when one of its keywords appears within its configured character
+    window of the match — that gating is what keeps a bare 9-digit number
+    from being redacted as a passport/routing number absent any nearby
+    context, so it must be honored here rather than treating every
+    context-pattern regex hit as an unconditional match.
+    """
+    reg = _get_registry()
+    found: list[str] = []
+    for name, (pattern, keywords, window) in reg.context_patterns.items():
+        matches = list(pattern.finditer(text))
+        if not matches:
+            continue
+        hit = False
+        # Replace back-to-front so earlier match offsets stay valid as the
+        # string is rebuilt piece by piece.
+        for m in reversed(matches):
+            if not keywords or _context_matches(text, m.start(), m.end(), keywords, window):
+                text = text[:m.start()] + f'[REDACTED_{name.upper()}]' + text[m.end():]
+                hit = True
+        if hit:
+            found.append(name)
+    return text, found
+
+
 def _redact_pii_in_string(text: str) -> tuple[str, list[str]]:
-    """Apply all PII patterns to a string, return (redacted_text, types_found)."""
+    """Apply all PII patterns to a string, return (redacted_text, types_found).
+
+    Applies the standalone ``regex_patterns`` first, then the keyword-gated
+    ``context_patterns`` (#19), so every consumer of this function — JSON
+    value redaction, log-line redaction, and CSV cell redaction — benefits
+    from both detector classes identically.
+    """
     reg = _get_registry()
     found = []
     for name, pattern in reg.regex_patterns.items():
         if pattern.search(text):
             text = pattern.sub(f'[REDACTED_{name.upper()}]', text)
             found.append(name)
+    text, context_found = _redact_context_patterns_in_string(text)
+    found.extend(context_found)
     return text, found
 
 
@@ -168,6 +240,10 @@ def sanitize_csv(filepath: Path) -> dict:
 
         headers = [h.lower().strip() for h in rows[0]]
         reg = _get_registry()
+        # reg.sensitive_json_keys includes the 'address' category (address,
+        # street, city, zip, zipcode, postal_code, employer, ...), so a CSV
+        # column literally headed 'address'/'city'/'zip' is redacted here,
+        # not just columns matching a PII regex (#20).
         sensitive_cols = {i for i, h in enumerate(headers) if h in reg.sensitive_json_keys}
 
         output = io.StringIO()
@@ -227,8 +303,54 @@ def find_sanitizable_text_files(dump_path: Path) -> dict[str, list[Path]]:
     return found
 
 
+def _partition_by_size(files: list[Path], limit: int, kind: str) -> tuple[list[Path], list[dict]]:
+    """Split ``files`` into those within ``limit`` and fail-closed residual records.
+
+    A file that cannot be sanitized because it exceeds its size cap — or
+    whose size cannot even be determined — must never simply disappear from
+    the run. Previously, oversize files were filtered out of the workload
+    with no trace anywhere: a >10MB log or JSON full of PII was neither
+    sanitized nor recorded as skipped, so the run could report success while
+    shipping it completely untouched (#21). Every excluded file is now
+    returned as an explicit ``text_sanitize_skipped`` action so a caller
+    inspecting the action list can never mistake "absent from the list" for
+    "handled".
+    """
+    within: list[Path] = []
+    residual: list[dict] = []
+    for f in files:
+        try:
+            size = f.stat().st_size
+        except OSError as e:
+            residual.append({
+                "action": "text_sanitize_skipped",
+                "path": str(f),
+                "file_type": kind,
+                "error": f"could not stat file — NOT sanitized, cannot certify clean: {e}",
+            })
+            continue
+        if size <= limit:
+            within.append(f)
+        else:
+            residual.append({
+                "action": "text_sanitize_skipped",
+                "path": str(f),
+                "file_type": kind,
+                "size": size,
+                "limit": limit,
+                "error": (
+                    f"{kind} file is {size} bytes (> {limit} byte limit) — "
+                    f"NOT sanitized; cannot certify clean"
+                ),
+            })
+    return within, residual
+
+
 def sanitize_all_text_files(dump_path: Path, dry_run: bool = False,
-                             workers: int = 1) -> list[dict]:
+                             workers: int = 1,
+                             json_size_limit: int = JSON_SIZE_LIMIT,
+                             log_size_limit: int = LOG_SIZE_LIMIT,
+                             csv_size_limit: int = CSV_SIZE_LIMIT) -> list[dict]:
     """Sanitize all discoverable text files in a dump.
 
     Args:
@@ -236,6 +358,15 @@ def sanitize_all_text_files(dump_path: Path, dry_run: bool = False,
         dry_run: If True, preview actions without executing.
         workers: Number of parallel workers.  1 = sequential (default).
                  0 = auto-detect (os.cpu_count()).  >1 = explicit pool size.
+        json_size_limit: Max JSON file size to sanitize, in bytes.
+        log_size_limit: Max size for log-class files (.log/.txt/.ips/.crash/
+                        .xml) to sanitize, in bytes.
+        csv_size_limit: Max CSV/TSV file size to sanitize, in bytes.
+
+    Files over their size limit (or that cannot be stat'd) are never silently
+    dropped: each is recorded as a ``text_sanitize_skipped`` action in the
+    returned list, fail closed, so the run cannot be mistaken for having
+    fully processed the dump (#21).
     """
     resolved_workers = workers if workers != 0 else (os.cpu_count() or 1)
 
@@ -249,16 +380,16 @@ def sanitize_all_text_files(dump_path: Path, dry_run: bool = False,
         else:
             actions.append(delete_shell_history(hist))
 
-    # Build workload lists for the three parallelisable types
-    def _within_limit(f: Path, limit: int) -> bool:
-        try:
-            return f.stat().st_size <= limit
-        except OSError:
-            return False
-
-    json_files = [jf for jf in files["json"] if _within_limit(jf, 50 * 1024 * 1024)]
-    log_files = [lf for lf in files["log"] if _within_limit(lf, 10 * 1024 * 1024)]
-    csv_files = [cf for cf in files["csv"] if _within_limit(cf, 50 * 1024 * 1024)]
+    # Build workload lists for the three parallelisable types. Oversize or
+    # unstatable files are pulled into *_residual fail-closed records rather
+    # than dropped (#21); recorded unconditionally, dry run or not, since a
+    # dry run must also preview what will NOT be handled.
+    json_files, json_residual = _partition_by_size(files["json"], json_size_limit, "json")
+    log_files, log_residual = _partition_by_size(files["log"], log_size_limit, "log")
+    csv_files, csv_residual = _partition_by_size(files["csv"], csv_size_limit, "csv")
+    actions.extend(json_residual)
+    actions.extend(log_residual)
+    actions.extend(csv_residual)
 
     if dry_run:
         for jf in json_files:
@@ -306,6 +437,9 @@ def sanitize_all_text_files(dump_path: Path, dry_run: bool = False,
             log.info(f"Sanitizing CSV file {i + 1}/{total_csv}: {cf.name}")
             actions.append(sanitize_csv(cf))
 
+    total_residual = len(json_residual) + len(log_residual) + len(csv_residual)
     log.info(f"Text sanitization: {len(files['history'])} history, "
-             f"{len(json_files)} JSON, {len(log_files)} log, {len(csv_files)} CSV")
+             f"{len(json_files)} JSON, {len(log_files)} log, {len(csv_files)} CSV"
+             + (f", {total_residual} oversize/unreadable skipped (fail closed)"
+                if total_residual else ""))
     return actions
