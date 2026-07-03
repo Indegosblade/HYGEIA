@@ -12,16 +12,20 @@ Covers:
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hygeia.cli import _resolve_workers, sanitize_databases
 from hygeia.scanner import ScanResult
 from hygeia.text_sanitizer import sanitize_all_text_files
+import hygeia.forensic_cleaner as fc_mod
+from hygeia.forensic_cleaner import forensic_clean_all
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +273,62 @@ def test_dry_run_unaffected_by_workers():
 
         # Actions should be recorded as dry_run
         assert any(a.get("dry_run") for a in actions), "No dry_run actions recorded"
+
+
+# ---------------------------------------------------------------------------
+# forensic_clean_all concurrency race (finding #34)
+# ---------------------------------------------------------------------------
+
+def test_forensic_clean_all_parallel_race_does_not_crash():
+    """
+    Regression for finding #34, reproducing the audit's own scenario
+    verbatim: "a .tmp ... file nested inside a directory that also matches
+    the cache/leveldb rules (e.g. .../Library/Caches/foo.tmp). With
+    --workers 4, the cache subtask rmtree's the Caches dir while the swap
+    subtask calls _sha256 on foo.tmp; open() raises FileNotFoundError, the
+    worker propagates it, and the whole run crashes with no manifest
+    produced."
+
+    Runs forensic_clean_all with REAL worker threads (workers=4) -- the
+    actual ThreadPoolExecutor / future.result() orchestration path -- against
+    exactly this nested fixture. _sha256 is patched to rmtree the shared
+    Caches directory the instant it is called, which deterministically
+    forces the TOCTOU race regardless of real thread scheduling luck, while
+    still exercising the genuine parallel pipeline end to end.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        caches = root / "AppData" / "Library" / "Caches"
+        caches.mkdir(parents=True)
+        pii_files = []
+        for i in range(5):
+            f = caches / f"session{i}.tmp"
+            f.write_bytes(f"pii session token {i} user{i}@example.com".encode())
+            pii_files.append(f)
+        # An unrelated file elsewhere must survive the whole run untouched.
+        safe = root / "keep.txt"
+        safe.write_text("not a forensic artifact")
+
+        real_sha256 = fc_mod._sha256
+
+        def racy_sha256(path):
+            # Simulate the cache-cleanup subtask winning the race and
+            # rmtree-ing the whole Caches directory an instant before the
+            # swap/temp subtask hashes a file inside it -- forced
+            # deterministically instead of hoping real threads interleave
+            # this way.
+            shutil.rmtree(caches, ignore_errors=True)
+            return real_sha256(path)  # would raise FileNotFoundError pre-fix
+
+        with patch.object(fc_mod, "_sha256", racy_sha256):
+            actions = forensic_clean_all(root, workers=4)  # must not raise
+
+        assert isinstance(actions, list)
+        assert len(actions) > 0
+        assert not caches.exists(), "the cache directory should still end up removed"
+        for f in pii_files:
+            assert not f.exists(), f"{f} (PII-bearing) must not survive the run"
+        assert safe.exists(), "unrelated files must be unaffected"
 
 
 if __name__ == "__main__":
