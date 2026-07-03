@@ -176,6 +176,8 @@ def _secure_overwrite(path: Path, root: Path | None = None) -> bool:
         flags = os.O_WRONLY
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_BINARY"):
+            flags |= os.O_BINARY  # Windows: no CRLF translation on os.write
         fd = os.open(str(path), flags)
         try:
             for _ in range(_SECURE_OVERWRITE_PASSES):
@@ -298,11 +300,17 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path) -> bool:
             f"recoverable deleted-record PII may remain; DB not certified sanitized"
         )
 
-    # Delete WAL/SHM/journal files
+    # Delete WAL/SHM/journal files. A companion can still be locked by another
+    # process (e.g. on Windows a -journal held by a DB an external connection
+    # left open); tolerate that instead of crashing — vacuum_ok already carries
+    # the real success/failure signal.
     for suffix in WAL_SUFFIXES:
         wal_file = Path(str(db_path) + suffix)
         if wal_file.exists():
-            wal_file.unlink()
+            try:
+                wal_file.unlink()
+            except OSError as e:
+                log.warning(f"Could not remove companion {wal_file.name}: {e}")
             log.debug(f"Deleted {wal_file.name}")
 
     return vacuum_ok

@@ -51,7 +51,12 @@ def _safe_utime_any(path: Path, root: Path, times: tuple[float, float]) -> bool:
             return safe_utime(path, root, times)
         if resolve_within(path, root) is None:
             return False
-        os.utime(path, times, follow_symlinks=False)
+        try:
+            os.utime(path, times, follow_symlinks=False)
+        except (NotImplementedError, ValueError):
+            # Windows lacks follow_symlinks=False for directories; the symlink
+            # check above already excluded links, so a plain os.utime is safe.
+            os.utime(path, times)
         return True
     except (OSError, NotImplementedError):
         return False
