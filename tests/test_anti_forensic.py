@@ -505,6 +505,31 @@ class TestCrashReporterCleanup:
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_race_vanished_file_skipped_not_crashed(self):
+        """Regression for finding #34: a sibling forensic subtask running
+        concurrently under --workers (e.g. one rmtree-ing a directory that
+        also matches the crash-reporter dir rule) may delete a .crash/.ips
+        file between the rglob scan and the hash. clean_crash_reporter_data
+        must skip the vanished file instead of letting _sha256()'s open()
+        raise FileNotFoundError and abort the whole parallel run."""
+        import hygeia.forensic_cleaner as fc_mod
+        d = _make_tmp()
+        try:
+            target = _touch(d / "crash.ips", b"username: alice -- deleted by a sibling subtask")
+            real_sha256 = fc_mod._sha256
+
+            def racy_sha256(path):
+                Path(path).unlink(missing_ok=True)
+                return real_sha256(path)  # would raise FileNotFoundError pre-fix
+
+            with patch.object(fc_mod, "_sha256", racy_sha256):
+                actions = clean_crash_reporter_data(d)  # must not raise
+
+            assert not target.exists()
+            assert not any(a.get("path") == "crash.ips" for a in actions)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
 
 # ---------------------------------------------------------------------------
 # 4b. Secure database deletion (finding #45)

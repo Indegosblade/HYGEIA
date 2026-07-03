@@ -7,6 +7,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
+import hygeia.forensic_cleaner as fc_mod
 from hygeia.forensic_cleaner import (
     clean_leveldb_stores,
     clean_thumbnail_caches,
@@ -326,14 +329,75 @@ class TestCleanThumbnailCaches:
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
-    def test_case_insensitive_cache_match(self):
-        """Any directory with cache in its name (any case) is removed."""
+    def test_exact_cache_name_still_matched_case_insensitively(self):
+        """Recognized exact cache-dir names still match regardless of case."""
+        d = _make_tmp()
+        try:
+            cache = _mkdir(d, "CACHE")
+            _touch(cache / "data1", b"x")
+            actions = clean_thumbnail_caches(d)
+            assert not cache.exists()
+            assert any(a["action"] == "delete_cache_dir" for a in actions)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_substring_cache_match_not_deleted(self):
+        """Regression for finding #33: a directory whose name merely CONTAINS
+        the substring "cache" -- but is not an exact recognized cache-dir
+        name -- must NOT be treated as a cache directory and must survive.
+
+        Inverted from the old test_case_insensitive_cache_match, which
+        asserted the unsafe substring-match-and-delete behavior audited as
+        #33 (any dir with "cache" anywhere in its name was rmtree'd).
+        """
         d = _make_tmp()
         try:
             mixed = _mkdir(d, "MyAppCacheData")
-            _touch(mixed / "f", b"x")
+            marker = _touch(mixed / "f", b"not actually a cache file")
             clean_thumbnail_caches(d)
-            assert not mixed.exists()
+            assert mixed.exists(), "substring 'cache' match must not trigger deletion (#33)"
+            assert marker.exists()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_document_cache_user_folder_preserved(self):
+        """Finding #33 failure scenario verbatim: a user folder literally
+        named "DocumentCache" holding real (bogus-but-realistic) user
+        documents must survive cache cleanup -- only an exact/allowlisted
+        cache-dir name (or the Library/Caches path suffix) may be deleted."""
+        d = _make_tmp()
+        try:
+            docs = _mkdir(d, "DocumentCache")
+            doc = _touch(docs / "tax-return-2025.pdf", b"%PDF-1.4 totally real user document, not a cache")
+            clean_thumbnail_caches(d)
+            assert docs.exists(), "DocumentCache is a user-data folder, not a cache dir (#33)"
+            assert doc.exists()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_email_cache_archive_folder_preserved(self):
+        """Second #33 example: "EmailCacheArchive" is a user data directory,
+        not a browser/app cache, and must not be rmtree'd."""
+        d = _make_tmp()
+        try:
+            archive = _mkdir(d, "EmailCacheArchive")
+            mail = _touch(archive / "inbox.mbox", b"From alice@example.com ...")
+            clean_thumbnail_caches(d)
+            assert archive.exists()
+            assert mail.exists()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_ios_library_caches_path_still_matched(self):
+        """The legitimate iOS Library/Caches path-suffix rule still applies
+        (this is a path match, not a name substring match, so #33's fix must
+        not have removed it)."""
+        d = _make_tmp()
+        try:
+            caches = _mkdir(d, "AppData", "Library", "Caches")
+            _touch(caches / "blob", b"x")
+            clean_thumbnail_caches(d)
+            assert not caches.exists()
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
@@ -376,6 +440,30 @@ class TestCleanThumbnailCaches:
             f = _touch(d / "thumbnails-journal", b"data")
             clean_thumbnail_caches(d)
             assert not f.exists()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_cache_file_race_vanished_file_skipped_not_crashed(self, monkeypatch):
+        """Regression for finding #34: a sibling forensic subtask (e.g. one
+        deleting the enclosing LevelDB/leveldb dir) may remove a cache file
+        between the rglob scan and the hash. clean_thumbnail_caches must
+        skip the vanished file instead of letting _sha256()'s open() raise
+        FileNotFoundError and abort the whole parallel run."""
+        d = _make_tmp()
+        try:
+            target = _touch(d / "thumbnails.db", b"pii the sibling subtask already deleted")
+            real_sha256 = fc_mod._sha256
+
+            def racy_sha256(path):
+                Path(path).unlink(missing_ok=True)
+                return real_sha256(path)  # would raise FileNotFoundError pre-fix
+
+            monkeypatch.setattr(fc_mod, "_sha256", racy_sha256)
+
+            actions = clean_thumbnail_caches(d)  # must not raise
+
+            assert not target.exists()
+            assert not any(a.get("path") == "thumbnails.db" for a in actions)
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
@@ -518,6 +606,39 @@ class TestCleanSwapTempFiles:
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
+    def test_race_vanished_file_skipped_not_crashed(self, monkeypatch):
+        """Regression for finding #34: if a sibling forensic subtask deletes
+        this file (or its parent dir) between the rglob scan and the hash,
+        _sha256()'s open() raises FileNotFoundError. clean_swap_temp_files
+        must catch this and skip the vanished file rather than propagating
+        and aborting the whole --workers run (this is exactly what a
+        ThreadPoolExecutor future.result() re-raises).
+
+        The mock reproduces the exact TOCTOU window: the file passes the
+        is_file() gate, then vanishes (deleted by our stand-in for a sibling
+        subtask) the instant before it would be hashed.
+        """
+        d = _make_tmp()
+        try:
+            target = _touch(d / "raced.tmp", b"pii the sibling subtask already deleted")
+            real_sha256 = fc_mod._sha256
+
+            def racy_sha256(path):
+                # Simulate a concurrent sibling subtask (e.g. clean_leveldb_stores)
+                # deleting this exact file out from under us right before we hash it.
+                Path(path).unlink(missing_ok=True)
+                return real_sha256(path)  # would raise FileNotFoundError pre-fix
+
+            monkeypatch.setattr(fc_mod, "_sha256", racy_sha256)
+
+            actions = clean_swap_temp_files(d)  # must not raise
+
+            assert not target.exists()
+            assert not any(a.get("path") == "raced.tmp" for a in actions), \
+                "a vanished file must not be recorded as successfully deleted with a hash"
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +703,62 @@ class TestNormalizeTimestamps:
                 assert abs(fp.stat().st_mtime - expected) < 2
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_symlink_to_outside_file_mtime_untouched(self):
+        """Regression for findings #31/#44: a symlink preserved in the dump
+        (copy_dump uses copytree(symlinks=True)) whose target lives OUTSIDE
+        dump_path must not have its mtime rewritten. Raw os.utime() defaults
+        to follow_symlinks=True, so normalizing the dump used to reset the
+        timestamp of an arbitrary host file such as /etc/hosts or a copied
+        /home link -- exactly the audited failure scenario."""
+        d = _make_tmp()
+        host_dir = _make_tmp()
+        try:
+            host_file = host_dir / "IMG.HEIC"
+            host_file.write_bytes(b"real host photo bytes, not part of the dump")
+            original_mtime = host_file.stat().st_mtime
+
+            link = d / "preserved_symlink.HEIC"
+            try:
+                link.symlink_to(host_file)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlinks not supported on this platform/privilege level")
+
+            normalize_timestamps(d)
+
+            assert host_file.stat().st_mtime == original_mtime, (
+                "normalize_timestamps must never follow a symlink and rewrite "
+                "the mtime of a file outside the dump"
+            )
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+            shutil.rmtree(host_dir, ignore_errors=True)
+
+    def test_symlink_to_outside_directory_mtime_untouched(self):
+        """Same as above but the symlink points at a directory outside the
+        dump (e.g. a preserved `/home` link) -- the external directory's own
+        mtime must also survive normalization untouched."""
+        d = _make_tmp()
+        host_dir = _make_tmp()
+        try:
+            (host_dir / "marker.txt").write_text("host data")
+            original_mtime = host_dir.stat().st_mtime
+
+            link = d / "home_link"
+            try:
+                link.symlink_to(host_dir, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlinks not supported on this platform/privilege level")
+
+            normalize_timestamps(d)
+
+            assert host_dir.stat().st_mtime == original_mtime, (
+                "normalize_timestamps must never follow a directory symlink "
+                "out of the dump"
+            )
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+            shutil.rmtree(host_dir, ignore_errors=True)
 
 
 
@@ -669,4 +846,40 @@ class TestForensicCleanAll:
             assert len(ts_actions) == 1
         finally:
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_never_touches_operator_host_clipboard(self, monkeypatch):
+        """Regression for finding #32: forensic_clean_all must never delete
+        the OPERATOR's own host clipboard history. clean_clipboard_history()
+        resolves %LOCALAPPDATA%/~Library on the machine running HYGEIA, not
+        dump_path -- calling it from this dump-sanitization pipeline
+        destroyed the analyst's own clipboard on every real run, which is
+        unrelated to the dump being sanitized."""
+        dump_dir = _make_tmp()
+        host_dir = _make_tmp()
+        try:
+            fx = self._build_full_fixture(dump_dir)
+
+            # Set up a fake HOST clipboard store with a marker file, exactly
+            # like clean_clipboard_history() would find on a real Windows box.
+            host_clipboard = host_dir / "Microsoft" / "Windows" / "Clipboard"
+            host_clipboard.mkdir(parents=True)
+            marker = _touch(host_clipboard / "item.dat", b"operator's own clipboard data")
+
+            monkeypatch.setattr(fc_mod.platform, "system", lambda: "Windows")
+            monkeypatch.setenv("LOCALAPPDATA", str(host_dir))
+
+            actions = forensic_clean_all(dump_dir)
+
+            assert marker.exists(), (
+                "forensic_clean_all must never touch the operator's host "
+                "clipboard -- it is not part of the dump being sanitized"
+            )
+            assert not any(a.get("action") == "delete_clipboard_history" for a in actions), (
+                "forensic_clean_all must not invoke clipboard cleanup at all"
+            )
+            # The rest of the pipeline must still have run normally.
+            assert not fx["ldb"].exists()
+        finally:
+            shutil.rmtree(dump_dir, ignore_errors=True)
+            shutil.rmtree(host_dir, ignore_errors=True)
 

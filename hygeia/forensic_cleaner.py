@@ -3,8 +3,13 @@ HYGEIA Forensic Cleaner -- anti-forensic hardening module.
 
 Removes artifacts that survive standard file deletion and can be
 recovered by forensic tools: LevelDB stores, thumbnail/browser caches,
-swap/temp files, file-system timestamps, macOS quarantine xattrs,
-crash reporter data, and clipboard history.
+swap/temp files, file-system timestamps, macOS quarantine xattrs, and
+crash reporter data.
+
+clean_clipboard_history() also lives in this module but is deliberately NOT
+part of the automatic forensic_clean_all() pipeline (see finding #32) -- it
+targets the *operator's own host* clipboard, not the dump being sanitized,
+and must only ever be invoked explicitly by a caller that wants that.
 """
 
 import logging
@@ -16,7 +21,40 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .utils import resolve_within, safe_utime
 from .utils import sha256 as _sha256
+
+
+def _safe_utime_any(path: Path, root: Path, times: tuple[float, float]) -> bool:
+    """Symlink-safe utime for a file OR a directory.
+
+    ``utils.safe_utime`` intentionally only permits regular files (it backs
+    in-place content rewriters that must never write through a symlink).
+    Timestamp normalization legitimately touches directory mtimes too (a
+    dump's own subdirectories), so this mirrors the same symlink +
+    containment guarantee for directories -- reusing ``resolve_within`` for
+    the containment check -- without the regular-file restriction, and
+    defers to ``safe_utime`` itself for anything that is not a directory.
+
+    Findings #31/#44: raw ``os.utime(fp, times)`` defaults to
+    ``follow_symlinks=True``, so a symlink preserved in the dump (copytree
+    uses ``symlinks=True``) whose target lives outside ``root`` had its
+    *target's* mtime rewritten to the normalization epoch -- corrupting
+    timestamps on an arbitrary host file (e.g. ``/etc/hosts`` or a copied
+    ``/home`` link). Never following symlinks (for both files and
+    directories) closes that hole.
+    """
+    try:
+        if path.is_symlink():
+            return False
+        if not path.is_dir():
+            return safe_utime(path, root, times)
+        if resolve_within(path, root) is None:
+            return False
+        os.utime(path, times, follow_symlinks=False)
+        return True
+    except (OSError, NotImplementedError):
+        return False
 
 
 def _inside_deleted(p: Path, deleted_dirs: list) -> bool:
@@ -136,7 +174,7 @@ def clean_leveldb_stores(dump_path, dry_run=False):
 # Thumbnail / browser cache cleanup
 
 _CACHE_DIR_NAMES_LOWER = frozenset({
-    "thumbnails", "cache", "gpucache", "code cache", "service worker",
+    "thumbnails", "cache", "caches", "cache2", "gpucache", "code cache", "service worker",
     "com.apple.uikit.pboardpersistentitems",
 })
 _IOS_CACHE_SUFFIX = "library/caches"
@@ -146,10 +184,18 @@ _CACHE_FILE_NAMES_LOWER = frozenset({
 
 
 def _is_cache_dir(path, dump_path):
+    """Return True only for a directory that IS a recognized cache store --
+    an exact (case-insensitive) name from the allowlist, or a path ending in
+    the standard ``Library/Caches`` component.
+
+    Finding #33: this used to also match any name merely CONTAINING the
+    substring "cache" (``"cache" in name_lower``), which rmtree'd legitimate
+    user-data folders like "DocumentCache" or "EmailCacheArchive" just
+    because "cache" appears in the name. Exact-name / exact-path-suffix
+    matching only -- no substring/endswith heuristics.
+    """
     name_lower = path.name.lower()
     if name_lower in _CACHE_DIR_NAMES_LOWER:
-        return True
-    if "cache" in name_lower:
         return True
     rel_lower = str(path.relative_to(dump_path)).replace("\\\\", "/").lower()
     if rel_lower.endswith(_IOS_CACHE_SUFFIX):
@@ -186,9 +232,22 @@ def clean_thumbnail_caches(dump_path, dry_run=False):
             if dry_run:
                 actions.append({"action": "delete_cache_file", "path": rel, "dry_run": True})
             else:
-                action = {"action": "delete_cache_file", "path": rel, "hash_before": _sha256(fp)}
-                fp.unlink(missing_ok=True)
-                actions.append(action)
+                # Finding #34: this file may have already been removed by a
+                # sibling forensic subtask running concurrently (e.g. its
+                # parent dir was just rmtree'd by clean_leveldb_stores). Skip
+                # a vanished file instead of letting open()/unlink() raise
+                # and abort the whole parallel run.
+                try:
+                    hash_before = _sha256(fp)
+                except OSError:
+                    log.debug(f"Skipping vanished cache file (raced with concurrent cleanup): {rel}")
+                    continue
+                try:
+                    fp.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.warning(f"Failed to delete cache file {rel}: {exc}")
+                    continue
+                actions.append({"action": "delete_cache_file", "path": rel, "hash_before": hash_before})
                 log.info(f"Deleted cache file: {rel}")
     log.debug(f"Thumbnail/cache cleanup: {len(actions)} items found")
     return actions
@@ -227,9 +286,21 @@ def clean_swap_temp_files(dump_path, dry_run=False):
             if dry_run:
                 actions.append({"action": "delete_swap_file", "path": rel, "dry_run": True})
             else:
-                action = {"action": "delete_swap_file", "path": rel, "hash_before": _sha256(fp)}
-                fp.unlink(missing_ok=True)
-                actions.append(action)
+                # Finding #34: guard against a sibling forensic subtask
+                # (running concurrently under --workers) having already
+                # deleted this file or its parent directory. A vanished file
+                # must be skipped, not raise and abort the whole run.
+                try:
+                    hash_before = _sha256(fp)
+                except OSError:
+                    log.debug(f"Skipping vanished swap/temp file (raced with concurrent cleanup): {rel}")
+                    continue
+                try:
+                    fp.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.warning(f"Failed to delete swap/temp file {rel}: {exc}")
+                    continue
+                actions.append({"action": "delete_swap_file", "path": rel, "hash_before": hash_before})
                 log.info(f"Deleted swap/temp file: {rel}")
     log.debug(f"Swap/temp cleanup: {len(actions)} files found")
     return actions
@@ -239,20 +310,19 @@ def clean_swap_temp_files(dump_path, dry_run=False):
 
 
 def normalize_timestamps(dump_path, epoch="2000-01-01"):
+    dump_path = Path(dump_path)
     dt = datetime.strptime(epoch, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     epoch_ts = dt.timestamp()
     normalized = 0
     errors = 0
     for fp in list(dump_path.rglob("*")):
-        try:
-            os.utime(fp, (epoch_ts, epoch_ts))
+        if _safe_utime_any(fp, dump_path, (epoch_ts, epoch_ts)):
             normalized += 1
-        except OSError:
+        else:
             errors += 1
-    try:
-        os.utime(dump_path, (epoch_ts, epoch_ts))
+    if _safe_utime_any(dump_path, dump_path, (epoch_ts, epoch_ts)):
         normalized += 1
-    except OSError:
+    else:
         errors += 1
     action = {
         "action": "normalize_timestamps",
@@ -449,9 +519,22 @@ def clean_crash_reporter_data(dump_path, dry_run=False):
             if dry_run:
                 actions.append({"action": "delete_crash_file", "path": rel, "dry_run": True})
             else:
-                action = {"action": "delete_crash_file", "path": rel, "hash_before": _sha256(fp)}
-                fp.unlink(missing_ok=True)
-                actions.append(action)
+                # Finding #34: a sibling forensic subtask (running
+                # concurrently under --workers) may have already deleted
+                # this file or its parent directory between the rglob scan
+                # and this hash. Skip a vanished file instead of letting
+                # open()/unlink() raise and abort the whole run.
+                try:
+                    hash_before = _sha256(fp)
+                except OSError:
+                    log.debug(f"Skipping vanished crash file (raced with concurrent cleanup): {rel}")
+                    continue
+                try:
+                    fp.unlink(missing_ok=True)
+                except OSError as exc:
+                    log.warning(f"Failed to delete crash file {rel}: {exc}")
+                    continue
+                actions.append({"action": "delete_crash_file", "path": rel, "hash_before": hash_before})
                 log.info(f"Deleted crash file: {rel}")
 
     log.debug(f"Crash reporter cleanup: {len(actions)} items found")
@@ -469,6 +552,15 @@ def clean_clipboard_history(dry_run=False):
 
     Returns a list of action dicts. Silently skips platforms that have
     neither location or where the paths do not exist.
+
+    WARNING (finding #32): this always targets the HOST machine running
+    HYGEIA (via ``%LOCALAPPDATA%`` / ``Path.home()``), never ``dump_path`` --
+    there is no per-dump clipboard artifact to clean, clipboard history is
+    not part of a device dump at all. Do NOT wire this into
+    ``forensic_clean_all()`` or any other dump-sanitization pipeline; it
+    must only be invoked by a caller that deliberately wants to clear the
+    *operator's own* clipboard history, never as a side effect of
+    sanitizing someone else's dump.
     """
     actions = []
     system = platform.system()
@@ -565,8 +657,15 @@ def forensic_clean_all(dump_path, dry_run=False, workers=1):
     # NTFS ADS detection (Windows only, detect-only — no deletion)
     actions.extend(detect_ntfs_ads(dump_path))
 
-    # Clipboard history cleanup (platform-aware, operates outside dump_path)
-    actions.extend(clean_clipboard_history(dry_run=dry_run))
+    # Finding #32: clean_clipboard_history() is intentionally NOT called
+    # here. It resolves %LOCALAPPDATA%/~Library paths on the machine running
+    # HYGEIA -- the OPERATOR's own host -- never dump_path. Wiring it into
+    # this dump-sanitization pipeline deleted the analyst's own live
+    # clipboard history on every real (non-dry-run) invocation: data that is
+    # not part of the dump being sanitized and that the operator never asked
+    # to touch. It remains available as a standalone function for a caller
+    # that explicitly wants to clear the operator's own clipboard, but must
+    # never be reintroduced into per-dump sanitization.
 
     if not dry_run:
         actions.extend(normalize_timestamps(dump_path))

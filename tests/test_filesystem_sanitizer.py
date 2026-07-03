@@ -6,6 +6,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hygeia.filesystem_sanitizer import sanitize_filesystem
@@ -108,6 +110,83 @@ def test_dry_run_no_changes():
     assert spotlight.exists(), "Dry run should not delete"
     assert any(a.get("dry_run") for a in actions)
     shutil.rmtree(d, ignore_errors=True)
+
+
+def test_normalize_timestamps_symlink_to_outside_file_untouched():
+    """Regression for finding #29: a symlink preserved in the dump (copy_dump
+    uses copytree(symlinks=True)) whose target lives OUTSIDE dump_path must
+    not have its mtime rewritten. Raw os.utime(f, times) defaults to
+    follow_symlinks=True, so normalizing timestamps used to reset the
+    modification time of an arbitrary host file the symlink pointed at --
+    e.g. /etc/hosts or a copied /home link."""
+    d = tempfile.mkdtemp()
+    host_dir = tempfile.mkdtemp()
+    try:
+        root = Path(d)
+        host_file = Path(host_dir) / "host_secret.txt"
+        host_file.write_text("operator's real file, not part of the dump")
+        original_mtime = host_file.stat().st_mtime
+
+        link = root / "preserved_link.txt"
+        try:
+            link.symlink_to(host_file)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not supported on this platform/privilege level")
+
+        # A genuine in-dump file must still get normalized, proving the pass ran.
+        in_dump = root / "note.txt"
+        in_dump.write_text("in-dump content")
+
+        sanitize_filesystem(root, normalize_timestamps=True)
+
+        assert host_file.stat().st_mtime == original_mtime, (
+            "normalize_timestamps must never follow a symlink out of the dump"
+        )
+        assert in_dump.stat().st_mtime == 946684800, (
+            "a genuine in-dump file must still be normalized"
+        )
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(host_dir, ignore_errors=True)
+
+
+def test_symlinked_forensic_dir_not_reported_as_deleted():
+    """Regression for finding #30: shutil.rmtree() refuses to operate on a
+    symlink (it raises, and ignore_errors=True swallows the error), so a
+    symlinked forensic-artifact directory is never actually removed. The old
+    code appended a "delete_forensic_dir" success action unconditionally --
+    a false clean recorded for a store that still exists in full. The real
+    target (living outside the dump, as a crafted dump could arrange) must
+    survive, and no success action may be recorded for it."""
+    d = tempfile.mkdtemp()
+    target_dir = tempfile.mkdtemp()
+    try:
+        root = Path(d)
+        target = Path(target_dir)
+        (target / "CURRENT").write_bytes(b"1")
+        pii_file = target / "000001.ldb"
+        pii_file.write_bytes(b"recoverable leveldb PII bytes")
+
+        (root / "Local Storage").mkdir(parents=True)
+        symlinked_store = root / "Local Storage" / "leveldb"
+        try:
+            symlinked_store.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlinks not supported on this platform/privilege level")
+
+        actions = sanitize_filesystem(root)
+
+        assert target.exists() and pii_file.exists(), (
+            "the real store outside the dump must survive -- rmtree must "
+            "never follow a symlink"
+        )
+        assert not any(
+            a.get("action") == "delete_forensic_dir" and a.get("path") == "Local Storage/leveldb"
+            for a in actions
+        ), "must not record a successful deletion for a symlinked store that was never removed"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(target_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
