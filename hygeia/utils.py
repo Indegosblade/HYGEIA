@@ -80,5 +80,14 @@ def safe_utime(path: Path, root: Path, times: tuple[float, float]) -> bool:
     try:
         os.utime(path, times, follow_symlinks=False)
         return True
-    except (OSError, NotImplementedError):
+    except (NotImplementedError, ValueError):
+        # Windows os.utime does not support follow_symlinks=False for regular
+        # files. is_safe_regular_file already excluded symlinks, so a plain
+        # os.utime cannot be redirected through a link here — safe to fall back.
+        try:
+            os.utime(path, times)
+            return True
+        except OSError:
+            return False
+    except OSError:
         return False
