@@ -14,6 +14,8 @@ Forensic-grade PII sanitization that actually understands what it's looking at.
 
 **Compliance:** HIPAA Safe Harbor · GDPR Article 4/9 · CCPA — with per-run coverage reporting.
 
+**Verification:** fail-closed — a run is only reported PASSED when there are zero PII findings *and* every check actually ran to completion. A missing tool, a locked database, an oversized file, or a narrowed `--only`/`--skip-patterns` scope makes HYGEIA exit non-zero and say so, instead of guessing clean.
+
 ---
 
 ## Why HYGEIA?
@@ -100,7 +102,7 @@ hygeia --list-patterns
 |------|---------|
 | 0 | Sanitization complete, verification passed (or skipped) |
 | 1 | Input error (path not found, output already exists) |
-| 2 | Verification failed — residual PII detected post-sanitization |
+| 2 | Verification failed — residual PII detected, and/or verification could not certify the dump clean (missing exiftool, a locked/unreadable/encrypted database, an oversized file, or a narrowed `--only`/`--skip-patterns` scope). HYGEIA never exits 0 when it can't back that up. |
 
 ---
 
@@ -113,12 +115,12 @@ HYGEIA runs a deterministic 7-stage pipeline on every invocation:
 [2/7] Databases     Platform detection → WAL-checkpoint → secure_delete → regex scan → table nuke → FTS rebuild → VACUUM
 [3/7] Text files    Redact PII in JSON, logs, CSV/TSV. Delete shell history files.
 [4/7] Forensics     Delete LevelDB stores, thumbnail caches, swap files, search indexes, session data.
-[5/7] Media         Strip EXIF from images, metadata from PDFs (author/creator/producer), Office docs (docx/xlsx/pptx properties).
-[6/7] Verify        Regex scan all surviving text and database content for residual PII.
+[5/7] Media         Strip EXIF from images, metadata from PDFs (author/creator/producer/XMP), Office docs (docx/xlsx/pptx properties + tracked-changes/comment authors).
+[6/7] Verify        Read-only, fail-closed scan: every row and column (incl. BLOB) of every surviving database, plus every text file, checked for residual PII. Anything that couldn't be checked to completion is recorded as incomplete, never assumed clean.
 [7/7] Manifest      Write JSON audit trail: actions taken, verification result, compliance report.
 ```
 
-The pipeline is fail-safe: if verification finds residual PII, HYGEIA exits with code 2 and reports exactly what was found and where. A passing run means zero PII detections across all scanned content.
+The pipeline is fail-closed: if verification finds residual PII — or cannot prove the output clean because some check didn't run to completion — HYGEIA exits with code 2 and reports exactly what was found, or what couldn't be checked, and where. A passing run means zero PII detections **and** zero incomplete checks across all scanned content.
 
 ---
 
@@ -131,8 +133,8 @@ All patterns live in a single JSON source of truth (`hygeia/rules/pii_patterns.j
 | Category | Patterns | Examples |
 |----------|----------|----------|
 | **Identity** | 12 | SSN, UK NIN, Indian PAN/Aadhaar, US passport, driver's license, Canadian SIN, Australian TFN, US ITIN, EIN |
-| **Location** | 4 | GPS coordinates, IPv4, IPv6, MAC addresses |
-| **Financial** | 6 | Credit cards, IBAN, SWIFT/BIC, US routing numbers, Bitcoin addresses, Ethereum addresses |
+| **Location** | 4 | GPS coordinates (incl. sub-1° values like `-0.1278`), IPv4, IPv6 (full + compressed `::` notation), MAC addresses |
+| **Financial** | 6 | Credit cards (incl. spaced/hyphenated Amex), IBAN, SWIFT/BIC, US routing numbers, Bitcoin addresses, Ethereum addresses |
 | **Credentials** | 8 | AWS access keys, AWS secret keys, GitHub tokens, Slack tokens, JWT tokens, generic API keys, private key headers, password key-value pairs |
 | **Crypto** | 4 | Bitcoin (legacy + bech32), Ethereum, plus Monero/Solana/Cardano (context-dependent) |
 | **Healthcare** | 3 | NPI (standalone + context), DEA numbers, Medicare MBI |
@@ -140,7 +142,7 @@ All patterns live in a single JSON source of truth (`hygeia/rules/pii_patterns.j
 
 ### Context-Dependent Patterns
 
-Short digit sequences (9-10 digits) require nearby keywords to avoid false positives:
+These patterns only fire when a nearby keyword confirms the context — short digit sequences (9-10 digits), key=value pairs, and base64-looking strings are too ambiguous to flag on content alone. They're applied consistently in both directions: during sanitization (JSON/log/CSV redaction) and during verification (residual-PII scanning), so a match is redacted the same way it would otherwise be flagged as a leftover finding:
 
 | Pattern | Keywords Required | Window |
 |---------|-------------------|--------|
@@ -150,6 +152,8 @@ Short digit sequences (9-10 digits) require nearby keywords to avoid false posit
 | Australian TFN | "tfn", "tax file" | 120 chars |
 | US routing number | "routing", "aba", "bank" | 120 chars |
 | Date of birth | "dob", "birth", "birthday" | 200 chars |
+| Password (key=value) | "password", "passwd", "pwd" | 200 chars |
+| AWS secret key | "aws", "secret", "AWS_SECRET" | 120 chars |
 | NPI | "npi", "provider", "prescriber" | 120 chars |
 
 ### Column-Name Detection
@@ -157,6 +161,8 @@ Short digit sequences (9-10 digits) require nearby keywords to avoid false posit
 60+ column names treated as inherently sensitive regardless of content — any non-empty value replaced with `[REDACTED]`:
 
 `email`, `username`, `password`, `phone`, `address`, `street`, `city`, `zip`, `first_name`, `last_name`, `full_name`, `ssn`, `credit_card`, `latitude`, `longitude`, `api_key`, `token`, `cookie`, `session`, `encrypted_value`, `ip_address`, `remote_addr`, `mac_address`, `device_id`, `udid`, `serial_number`, `imei`, `account_number`, and more.
+
+JSON/plist key-name detection additionally recognizes a dedicated `address` category (`street`, `city`, `zip`, `postal_code`, `employer`, `organization`, and more) and iOS CoreData location columns (`ZLATITUDE`, `ZLONGITUDE`, `ZLOCATION`, `ZALTITUDE`, `ZCOORDINATE`). The CoreData names also drive GPS detection in plist **float** and location-hint-keyed integer values (e.g. `lastKnownLatitude` stored as a `<real>`), which were previously left untouched regardless of key name.
 
 ### Table-Level Nuking
 
@@ -185,7 +191,7 @@ places.sqlite, cookies.sqlite, formhistory.sqlite, permissions.sqlite, content-p
 
 ### iOS (8 handlers)
 
-Messages, Photos.sqlite, Health, Contacts, Safari History/Bookmarks, Notes, knowledgeC, Screen Time, TCC.db. Jailbreak-aware scanning with dynamic detection of Dopamine, palera1n, and RootHide. Preserves jailbreak infrastructure (`/var/jb/`, `/private/preboot/`, package databases) while removing user data. Column-level sanitization for knowledgeC.db (redacts third-party app names, preserves system app usage) and Photos.sqlite (NULLs GPS coordinates, deletes facial recognition data). SEGB biome stream deletion. Third-party app container cleanup with WAL handling.
+Messages, Photos.sqlite, Health, Contacts, Safari History/Bookmarks, Notes, knowledgeC, Screen Time, TCC.db. Jailbreak-aware scanning with dynamic detection of Dopamine, palera1n, and RootHide. Preserves jailbreak infrastructure (`/var/jb/`, `/private/preboot/`, package databases) while removing user data. Column-level sanitization for knowledgeC.db (redacts third-party app names, preserves system app usage) and Photos.sqlite (NULLs GPS coordinates, deletes facial recognition data — detection now correctly matches both the pre-iOS-14 (`ZGENERICASSET`) and iOS 14+ (`ZASSET`) schema, either of which is sufficient on its own). SEGB biome stream deletion. Third-party app container cleanup with WAL handling.
 
 ### Android (3 handlers)
 
@@ -205,7 +211,7 @@ Shell history files (.bash_history, .zsh_history, .python_history, etc.), GNOME 
 
 ### Generic (fallback for any unrecognized database)
 
-Any directory containing SQLite databases: HYGEIA scans every TEXT column in every table for PII patterns, with no platform-specific knowledge required. This is the safety net — if your database isn't one of the 20 recognized types, it still gets sanitized.
+Any directory containing SQLite databases: HYGEIA scans every column in every table — regardless of declared type, including BLOB/INTEGER/REAL columns holding text-as-bytes — for PII patterns, with no platform-specific knowledge required. This is the safety net — if your database isn't one of the 20 recognized types, it still gets sanitized.
 
 ---
 
@@ -213,19 +219,23 @@ Any directory containing SQLite databases: HYGEIA scans every TEXT column in eve
 
 ### HIPAA Safe Harbor (45 CFR 164.514(b)(2))
 
-The `--compliance hipaa` flag activates detection for all 18 Safe Harbor identifiers: names, geographic subdivisions below state level, dates (except year), phone numbers, fax numbers, email addresses, Social Security numbers, medical record numbers, health plan beneficiary numbers, account numbers, certificate/license numbers, vehicle identifiers, device identifiers, web URLs, IP addresses, biometric identifiers, photographs, and unique codes. HYGEIA's output summary reports which identifiers were covered and which have gaps for the specific dataset.
+The `--compliance hipaa` flag activates detection for all 18 Safe Harbor identifiers: names, geographic subdivisions below state level, dates (except year), phone numbers, fax numbers, email addresses, Social Security numbers, medical record numbers, health plan beneficiary numbers, account numbers, certificate/license numbers, vehicle identifiers, device identifiers, web URLs, IP addresses, biometric identifiers, photographs, and unique codes. Every run evaluates all 18 against the evidence the sanitizer actually produced (redacted columns, nuked tables, regex hits) — an identifier is reported `covered` only when there's positive evidence for it; otherwise it's a `gap` (fail closed: absence of evidence is never silently treated as removed).
+
+Safe Harbor also calls for dates to be generalized to the year and ZIP codes truncated to 3 digits (`000` for the HHS-listed low-population prefixes). `generalize_date()`/`truncate_zip()` implement those transforms and are wired through `ComplianceProfile.transform_value()`, but the running pipeline itself only redacts date-of-birth/ZIP *columns* by name — it does not rewrite free-text dates or ZIP codes found elsewhere. The per-run report spells this out as a `limitations` entry rather than letting a `covered` dates/geography result imply more than was actually done.
 
 ### GDPR Article 4/9
 
-The `--compliance gdpr` flag adds detection for special category data as defined in Article 9: racial/ethnic origin, political opinions, religious beliefs, trade union membership, genetic data, biometric data, health data, and sexual orientation. Column-name detection is extended with terms like `race`, `ethnicity`, `religion`, `political_opinion`, `genetic_data`, `health_data`.
+The `--compliance gdpr` flag adds detection for special category data as defined in Article 9: racial/ethnic origin, political opinions, religious beliefs, trade union membership, genetic data, biometric data, health data, and sexual orientation. Column-name detection is extended with terms like `race`, `ethnicity`, `religion`, `political_opinion`, `genetic_data`, `health_data`. Like HIPAA, GDPR mode reports real per-identifier `covered`/`gaps` (previously the framework name was reported with no coverage detail behind it). Special-category detection is column-name-based only — free-text special-category data in a notes/bio/message column is not detected, and the report says so via a standing `limitations` entry and an explicit `free_text_special_categories` gap.
 
 ### CCPA
 
-The `--compliance ccpa` flag treats browsing history, search history, geolocation data, and purchase/transaction records as mandatory-delete categories, reflecting the CCPA's broad definition of personal information that includes behavioral and commercial data.
+The `--compliance ccpa` flag treats browsing history, search history, geolocation data, and purchase/transaction records as mandatory-delete categories, reflecting the CCPA's broad definition of personal information that includes behavioral and commercial data. As with GDPR, CCPA mode reports identifier-level coverage/gaps rather than a bare framework label, and calls out when a `delete_browsing_history` request found no matching tables to delete in that particular dump.
 
 ### Combined Mode
 
 `--compliance all` applies the union of all frameworks — the most aggressive sanitization profile available.
+
+Every compliance run's report — any mode — includes `identifiers_covered`, `gaps`, and a `limitations` list. The named framework (`HIPAA Safe Harbor`, etc.) is only ever a label; those three fields are the honest, per-dataset account of what was actually delivered, and nothing is marked `covered` without positive evidence from that run.
 
 ---
 
@@ -237,27 +247,36 @@ HYGEIA is designed to produce output that withstands examination by forensic too
 |-----------|----------------|
 | WAL checkpoint + companion file deletion | WAL file carving for deleted records |
 | `PRAGMA secure_delete = ON` | Deleted cell recovery within live database pages |
-| VACUUM rebuild | Freelist page carving from unallocated database pages |
-| FTS shadow table rebuild | Full-text search index data recovery (`*_content`, `*_segments`) |
+| VACUUM rebuild (failure surfaced, never silent) | Freelist page carving from unallocated database pages |
+| FTS3/4/5 shadow table rebuild — fails closed on structurally contentless/external-content tables | Full-text search index data recovery (`*_content`, `*_segments`, `*_data`, `*_idx`) |
+| Random-byte overwrite before unlink (databases + WAL/SHM/journal companions) | Forensic carving of deleted database bytes from unallocated disk blocks |
 | LevelDB directory deletion | Chrome localStorage/IndexedDB content carving |
 | Thumbnail cache deletion | Thumbnail persistence after source file deletion |
 | Swap/hibernation file deletion | RAM artifact recovery from pagefile.sys, hiberfil.sys |
 | Shell history deletion | Command-line credential and activity recovery |
 | Spotlight/search index deletion | Indexed document content recovery |
-| Timestamp normalization | MACB timeline reconstruction and activity correlation |
+| Timestamp normalization (symlink-safe — never follows a link off the dump) | MACB timeline reconstruction and activity correlation |
 
 ---
 
 ## Verification
 
-Every sanitization run includes automatic verification (disable with `--skip-verify`):
+Every sanitization run includes automatic verification (disable with `--skip-verify`). Verification is **fail-closed**: it never reports a dump clean when it could not actually prove that — a missing tool, a locked database, or a narrowed pattern selection blocks a PASSED result exactly like a residual PII match would.
 
-1. **Content scan**: All surviving text files and SQLite database contents are regex-scanned for the full set of PII patterns.
-2. **Freelist inspection**: Every SQLite database is checked for non-zero freelist page counts. After VACUUM, any remaining free pages indicate potential data recovery.
-3. **EXIF check**: All images are verified for residual GPS coordinates and device identifier tags.
+1. **Content scan**: every surviving text file, and the full content of every SQLite database — all tables, all columns regardless of declared type (TEXT/BLOB/INTEGER/REAL), all rows, no row cap — is regex-scanned for the full set of PII patterns. BLOB/bytes cells are UTF-8 decoded before matching, so PII stored in a column typed as binary is still caught. Databases are opened strictly read-only (`mode=ro`); verification never writes to, VACUUMs, or otherwise mutates the artifact it's checking.
+2. **Freelist inspection**: every SQLite database is opened read-only and checked for non-zero freelist page counts. Any non-zero freelist is always reported as a finding — verification no longer attempts its own VACUUM and silently drops the finding when that VACUUM is blocked by a lock (which used to happen for e.g. a Chrome WAL lock on "Login Data").
+3. **EXIF check**: images are verified for residual GPS coordinates and device identifier tags — but only when exiftool is installed. Without it, images are neither stripped nor verified, and this is now reported as an **incomplete** check rather than a silent, unearned pass.
 4. **False positive filtering**: URL columns, system framework paths, and already-redacted values are excluded to prevent noise.
 
-A passing verification means zero PII detections across all scanned content. A failing verification reports the exact file, table, column, row, and matched pattern for every finding.
+A run ends in one of three states:
+
+- **PASSED** — zero PII findings, zero freelist findings, zero EXIF failures, and every check ran to completion. Exit code 0.
+- **FAILED (findings)** — one or more residual PII, freelist, or EXIF findings. Exit code 2.
+- **FAILED (incomplete)** — every check that *did* run found nothing, but at least one check could not be completed at all: exiftool missing, a database locked/corrupt/encrypted and unreadable, a file or database too large to scan, or a `--only`/`--skip-patterns` run that narrowed the categories checked. HYGEIA prints exactly which checks are incomplete and why, and exits code 2 — it will not print "PASSED" when it cannot back that up.
+
+A `--only`/`--skip-patterns` run also carries a **scope** annotation: since it only checked the selected categories, a pass is reported as "PASSED for scoped categories (...) only — NOT a full-clean certification," never as an unqualified clean bill of health.
+
+A failing verification reports the exact file, table, column, row, and matched pattern for every finding — and the exact check, path, and reason for every incomplete item.
 
 ---
 
@@ -295,11 +314,12 @@ from hygeia.filesystem_sanitizer import sanitize_filesystem
 actions = sanitize_filesystem(Path("/path/to/dump"), normalize_timestamps=True)
 # => [{'action': 'delete', 'path': 'LocalStorage/leveldb/', 'reason': 'leveldb_store'}, ...]
 
-# Post-sanitization verification
+# Post-sanitization verification (fail-closed: passed requires zero findings
+# AND zero incomplete checks — see result.incomplete / result.scope)
 from hygeia.verifier import verify_sanitization
 result = verify_sanitization(Path("/path/to/clean"))
-assert result.passed, f"{result.total_findings} PII findings remain"
-# => VerificationResult(passed=True, total_findings=0, files_scanned=26)
+assert result.passed, f"{result.total_findings} findings, {len(result.incomplete)} incomplete checks"
+# => VerificationResult(passed=True, total_findings=0, incomplete=[], scope=None)
 
 # Compliance-driven sanitization
 from hygeia.compliance import get_compliance_profile
@@ -325,6 +345,8 @@ WARNING: exiftool not installed. Image metadata will NOT be stripped.
          Install from https://exiftool.org/ to enable EXIF stripping.
 ```
 
+Verification honors the same gap: if exiftool is missing and the dump contains images, step [6/7] reports those images as an **incomplete** check — neither stripped nor verified — instead of reporting a false PASSED. Install exiftool, or accept the incomplete result and its non-zero exit code, if the dump contains images.
+
 **Installation:**
 
 | Platform | Command |
@@ -346,18 +368,19 @@ hygeia/
 ├── cli.py                   7-stage pipeline orchestrator + CLI argument handling
 ├── scanner.py               File classification engine (DELETE/PRESERVE/SELECTIVE_DB/PLIST/EXIF)
 ├── patterns.py              Central pattern registry — loads pii_patterns.json, compiles regexes, filters by --only/--skip
-├── sqlite_sanitizer.py      WAL-aware database sanitization — checkpoint → secure_delete → scan → VACUUM
+├── sqlite_sanitizer.py      WAL-aware database sanitization — checkpoint → secure_delete → scan → VACUUM; safe identifier quoting, BLOB scanning, FTS3/4/5 fail-closed cleanup, secure-overwrite delete
 ├── platform_handlers.py     20 tested schema-aware handlers (Chrome, Firefox, iOS, Android, Windows, macOS) with table-signature auto-detection
-├── text_sanitizer.py        JSON, log, CSV/TSV sanitization + shell history deletion
-├── filesystem_sanitizer.py  Forensic artifact removal — LevelDB, caches, swap, indexes
-├── forensic_cleaner.py      Anti-forensic hardening — slack space, ADS, extended attributes
-├── plist_sanitizer.py       Binary plist credential redaction (recursive key-walk)
+├── text_sanitizer.py        JSON, log, CSV/TSV sanitization + shell history deletion; context-pattern redaction (DOB, passwords, AWS keys, ...), fail-closed oversize handling
+├── filesystem_sanitizer.py  Forensic artifact removal — LevelDB, caches, swap, indexes; symlink-safe timestamp normalization
+├── forensic_cleaner.py      Anti-forensic hardening — slack space, ADS, extended attributes; symlink containment, concurrent-worker-safe cleanup
+├── plist_sanitizer.py       Binary plist credential redaction (recursive key-walk, incl. float/GPS values and location-hint integers)
 ├── exif_stripper.py         Image metadata removal via exiftool (9 formats)
-├── pdf_stripper.py          PDF metadata stripping (author, creator, producer, keywords)
-├── office_stripper.py       Office document metadata removal (docx/xlsx/pptx XML properties)
-├── compliance.py            HIPAA/GDPR/CCPA compliance profiles + coverage reporting
-├── verifier.py              Post-sanitization PII verification (regex + freelist + EXIF)
+├── pdf_stripper.py          PDF metadata stripping (author, creator, producer, keywords, XMP packets); symlink-safe in-place rewrite
+├── office_stripper.py       Office document metadata removal (docx/xlsx/pptx XML properties, tracked-changes/comment authors); DTD/entity-expansion guard
+├── compliance.py            HIPAA/GDPR/CCPA compliance profiles + evidence-based coverage reporting with a `limitations` field
+├── verifier.py              Post-sanitization PII verification (regex + freelist + EXIF) — read-only, fail-closed (`incomplete`/`scope`), exits 2 when it can't certify clean
 ├── manifest.py              JSON audit trail generation
+├── utils.py                 Shared helpers — SQL identifier quoting, symlink containment (`resolve_within`, `is_safe_regular_file`, `safe_utime`)
 └── rules/
     ├── pii_patterns.json          Single source of truth — 40+ regex patterns in 7 categories
     ├── delete_patterns.json       34 directory + 40 database + 10 extension patterns
@@ -376,7 +399,7 @@ Documenting what HYGEIA doesn't do is as important as what it does:
 
 | Limitation | Detail |
 |-----------|--------|
-| **Encrypted databases** | HYGEIA cannot read or sanitize encrypted SQLite databases (e.g. Signal's sqlcipher, FileVault-encrypted volumes). If a database requires a key to open, it's skipped with a warning. |
+| **Encrypted databases** | HYGEIA cannot read or sanitize encrypted SQLite databases (e.g. Signal's sqlcipher, FileVault-encrypted volumes). If a database requires a key to open, it's skipped with a warning during sanitization — and because verification is fail-closed, that same unreadable database is reported as an **incomplete** check, so a dump containing one exits 2, not 0. |
 | **Non-SQLite databases** | ESE databases (Windows WebCache, SRUM) are identified and flagged but not parsed internally. LevelDB stores are deleted entirely rather than selectively sanitized. |
 | **Binary application data** | Proprietary binary formats (e.g. Chrome's SNSS session files, Firefox sessionstore.jsonlz4 internals) are deleted rather than surgically edited. |
 | **Network captures** | PCAP/PCAPNG files are not parsed. If your dump contains packet captures, remove them separately. |
@@ -397,9 +420,9 @@ The post-sanitization verifier intentionally suppresses certain pattern matches 
 | `dea_number` | Inside `.plist` files | Carrier bundle checksums match DEA alphanumeric format by coincidence. |
 | `bitcoin_address` | Match is purely hexadecimal (`[0-9a-f]` only) | Hex UUIDs and hash digests (ChromaDB embedding IDs, git SHAs) start with `1` and match the base58 length requirements but aren't crypto addresses. Real bitcoin uses base58 (mixed case, excludes 0/O/I/l). |
 | `password_kv` | Column is a vector DB content column (`string_value`, `c0`, `metadata`, `document`) | Embedding databases store conversation text that naturally contains the word "password" in context — not actual credential key-value pairs. |
-| `ssn` | Column is a CoreData internal (`z_pk`, `z_ent`, `zvalue`, etc.) or inside `.plist`/`.db` files | Sequential integers and epoch timestamps in Apple CoreData schemas match 9-digit SSN format. |
+| `ssn` | Column is a CoreData internal (`z_pk`, `z_ent`, `zvalue`, `ztimestamp`, etc.) — **no longer suppressed merely for being inside a `.plist`/`.json`/`.db` file** | Sequential integers and epoch timestamps in Apple CoreData schemas match 9-digit SSN format by column name only. A bare unformatted SSN (`123456789`) in a JSON/plist/db export is a real finding and is no longer blanket-hidden by file extension. |
 | `ip_v4` | Address is in RFC-1918 private range, Apple 17/8 block, or all single-digit octets | Private/internal IPs and version strings (e.g. `2.3.5.8`) aren't user-identifying. |
-| `gps_coord` | Value > 180 or < 1, or decimal part ≥ 8 digits in `.plist`, or in `external_mod_tag` column | Layout metrics, version numbers, and sync tags match float format but aren't geographic coordinates. |
+| `gps_coord` | Value > 180 or exactly `0`; a leading-zero integer part not written as `0.x` (version strings); a `.plist`-only value ending in exactly 4 decimals or with ≥8 decimal digits; or the `external_mod_tag` column | Layout metrics, version numbers, and sync tags match float format but aren't geographic coordinates. Sub-1° coordinates (e.g. `-0.1278`, `5.6231`) are **no longer suppressed** — equatorial latitudes and prime-meridian longitudes are real GPS data — and the 4-decimal/≥8-decimal layout-metric rules now apply to `.plist` only (previously also suppressed real GPS values in `.json` exports). |
 
 **If you suspect a suppression is hiding real PII in your dataset**, run `hygeia --skip-verify` and then manually inspect the output with your own tooling. The suppressions exist to reduce noise on common data types — they are not guarantees.
 
