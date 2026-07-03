@@ -21,6 +21,7 @@ import logging
 from pathlib import Path
 
 from hygeia.text_sanitizer import _redact_pii_in_string
+from .patterns import _load_raw as _load_pii_registry_raw
 from .utils import sha256 as _sha256
 
 log = logging.getLogger("hygeia.plist")
@@ -146,6 +147,16 @@ def _try_scan_nested_plist_bytes(value: bytes, found_types: list, path: str):
 
     Returns None when the bytes are not a plist (certificates, raw binary,
     etc.) so the caller can leave them untouched.
+
+    If PII IS found in the nested structure but the sanitized copy cannot be
+    re-serialised (plistlib.dumps raising -- e.g. a value shape that only
+    round-trips in one plist format), the caller will keep the ORIGINAL,
+    un-redacted bytes. In that case the hits already recorded above must not
+    be left in *found_types* looking like a normal, successfully-handled PII
+    hit -- that would let the manifest/verifier accounting claim the PII was
+    removed when it demonstrably was not (#12). They are rolled back and
+    replaced with a single explicit failure marker so the failure is
+    surfaced (fail closed) instead of silently counted as "handled".
     """
     # Quick header check — avoid plistlib overhead on random binary blobs.
     if not (value.startswith(b"<?xml") or value.startswith(b"bplist")):
@@ -166,7 +177,14 @@ def _try_scan_nested_plist_bytes(value: bytes, found_types: list, path: str):
 
     try:
         return plistlib.dumps(nested, fmt=nested_fmt)
-    except Exception:
+    except Exception as e:
+        del found_types[hits_before:]
+        found_types.append((path, "nested_plist_reserialize_failed"))
+        log.error(
+            f"Nested plist at {path!r} contained PII that could not be "
+            f"re-serialised after redaction ({e}); original un-redacted "
+            f"bytes were retained"
+        )
         return None
 
 
@@ -182,6 +200,44 @@ def _key_suggests_phone(key: str) -> bool:
     """Return True if the plist key name suggests the integer value is a phone number."""
     k = key.lower().replace("_", "").replace("-", "").replace(" ", "")
     return any(hint in k for hint in _PHONE_KEY_HINTS)
+
+
+# Location key-name hints, loaded from the shared PII pattern registry
+# (rules/pii_patterns.json: sensitive_columns.location) instead of a second
+# hardcoded list. That list already covers latitude/longitude/lat/lng/lon/
+# geolocation/coordinates/gps AND the CoreData Z-prefixed names (zlatitude/
+# zlongitude/zlocation/zaltitude/zcoordinate), so a name added there for the
+# SQLite sanitizer is automatically honoured here too (#13).
+_LOCATION_KEY_HINTS_CACHE: frozenset | None = None
+
+
+def _load_location_key_hints() -> frozenset:
+    """Load+cache the 'location' sensitive-column vocabulary from the
+    registry. Falls back to an empty set (never raises) so a missing/corrupt
+    registry file degrades to "no key-name hint available" rather than
+    crashing plist sanitization -- the content-based gps_coord regex scan
+    still runs independently of this.
+    """
+    global _LOCATION_KEY_HINTS_CACHE
+    if _LOCATION_KEY_HINTS_CACHE is None:
+        try:
+            raw = _load_pii_registry_raw()
+            hints = raw.get("sensitive_columns", {}).get("location", [])
+            _LOCATION_KEY_HINTS_CACHE = frozenset(h.lower() for h in hints)
+        except Exception:
+            log.warning("Could not load location key hints from pii_patterns.json registry")
+            _LOCATION_KEY_HINTS_CACHE = frozenset()
+    return _LOCATION_KEY_HINTS_CACHE
+
+
+def _key_suggests_location(key: str) -> bool:
+    """Return True if the plist key name suggests a numeric value encodes
+    GPS/location data (latitude, longitude, altitude, coordinate, ...)."""
+    hints = _load_location_key_hints()
+    if not hints:
+        return False
+    k = key.lower().replace("_", "").replace("-", "").replace(" ", "")
+    return any(hint in k for hint in hints)
 
 
 def _regex_scan_plist(obj, found_types: list, path: str = ""):
@@ -202,6 +258,27 @@ def _regex_scan_plist(obj, found_types: list, path: str = ""):
        "50:57:8A:E4:47:FD" used as keys in com.apple.Accessibility.plist).
        When a key matches a MAC address pattern the entire key+value subtree is
        replaced with a redacted key name.
+
+    3. Float values (e.g. <real>37.7749</real> under lastKnownLatitude in
+       locationd/routined/Maps state caches).  Floats used to be excluded from
+       every PII check ("bool, float, datetime — leave untouched"), so GPS
+       coordinates stored this way — a routine occurrence, since CoreLocation
+       serialises lat/lng as doubles — survived sanitization untouched
+       regardless of key name (#13).  The float's decimal string form is
+       scanned with the same PII_PATTERNS used for strings/ints (this is what
+       catches gps_coord regardless of key), and — because a coordinate
+       rounded to only a couple of decimal places can be too short for
+       gps_coord to match on content alone — a value under a key the shared
+       registry already treats as location-sensitive (sensitive_columns.location,
+       which also covers CoreData's Z-prefixed zlatitude/zlongitude/zlocation)
+       is zeroed unconditionally as a fallback.  On a match the float is
+       replaced with 0.0.
+
+    4. Integer values under a location-hint key (e.g. a fixed-point/scaled
+       coordinate such as latitude*1e7) are zeroed the same way as (3) — a
+       scaled integer has no decimal point for gps_coord to match against, so
+       the key name is the only usable signal, mirroring the phone-hint
+       integer handling in (1) but for location instead of phone (#13).
 
     bytes values are inspected for embedded XML or binary plists (e.g. the
     CachedBag key in com.apple.facetime.bag.plist).  If the bytes parse as a
@@ -255,13 +332,34 @@ def _regex_scan_plist(obj, found_types: list, path: str = ""):
                         obj[current_key] = 0
                         for t in types:
                             found_types.append((child_path, t))
+                elif value != 0 and _key_suggests_location(current_key):
+                    # Fixed-point/scaled coordinate (e.g. an E7-format
+                    # latitude*1e7 int) — no decimal point for gps_coord to
+                    # match, so the location-hint key name is the only
+                    # available signal (#13).
+                    obj[current_key] = 0
+                    found_types.append((child_path, "gps_coord"))
+            elif isinstance(value, float):
+                # GPS/location floats (#13) — see docstring case 3. Content
+                # scan first (catches coordinates regardless of key name);
+                # fall back to the location-hint key name for coordinates
+                # too short/rounded for gps_coord to match on content alone.
+                float_str = str(value)
+                _, types = _redact_pii_in_string(float_str)
+                if types:
+                    obj[current_key] = 0.0
+                    for t in types:
+                        found_types.append((child_path, t))
+                elif value != 0.0 and _key_suggests_location(current_key):
+                    obj[current_key] = 0.0
+                    found_types.append((child_path, "gps_coord"))
             elif isinstance(value, bytes):
                 sanitised = _try_scan_nested_plist_bytes(value, found_types, child_path)
                 if sanitised is not None:
                     obj[current_key] = sanitised
             elif isinstance(value, (dict, list)):
                 _regex_scan_plist(value, found_types, child_path)
-            # bool, float, datetime — leave untouched
+            # bool, datetime — leave untouched
     elif isinstance(obj, list):
         for i, item in enumerate(obj):
             child_path = f"{path}[{i}]"
@@ -272,6 +370,16 @@ def _regex_scan_plist(obj, found_types: list, path: str = ""):
                 redacted, types = _redact_pii_in_string(item)
                 if types:
                     obj[i] = redacted
+                    for t in types:
+                        found_types.append((child_path, t))
+            elif isinstance(item, float):
+                # Array-form coordinate pairs (e.g. [lat, lng]) get the same
+                # content scan as dict-value floats (#13). List items have no
+                # key name, so only the content-based check applies here.
+                item_str = str(item)
+                _, types = _redact_pii_in_string(item_str)
+                if types:
+                    obj[i] = 0.0
                     for t in types:
                         found_types.append((child_path, t))
             elif isinstance(item, bytes):
@@ -306,9 +414,17 @@ def sanitize_plist(filepath: Path) -> dict:
       * Walk ALL string values in the entire plist structure
       * Apply PII_PATTERNS (email, phone, MAC, IMEI, IP, …) to every string
       * Replaces matches with [REDACTED_<TYPE>]
-      * Does NOT touch booleans, integers, floats, bytes, or dates
+      * Also scans float values and phone/location-hint-keyed integer values
+        for numeric PII (e.g. GPS coordinates, #13) — see _regex_scan_plist.
+      * Does NOT touch booleans, bytes, or dates
 
     The file is written back in its original format (binary → binary, XML → XML).
+
+    If a nested plist embedded as a bytes value contains PII that could not
+    be re-serialised after redaction (#12), the failure is surfaced in
+    result["error"] and as a "nested_plist_reserialize_failed" entry in
+    regex_hits rather than silently counted as a normal, successfully
+    redacted hit — see _try_scan_nested_plist_bytes.
 
     Returns action result dict with keys_redacted and regex_hits fields.
     """
@@ -344,6 +460,18 @@ def sanitize_plist(filepath: Path) -> dict:
     _regex_scan_plist(data, regex_hits)
     result["regex_hits"] = regex_hits
 
+    # #12: a nested-plist re-serialization failure leaves the ORIGINAL,
+    # un-redacted bytes in place for that value. Surface it at the top level
+    # (fail closed) instead of letting the run report success while PII the
+    # tool itself found remains recoverable in the output.
+    nested_failures = [p for p, t in regex_hits if t == "nested_plist_reserialize_failed"]
+    if nested_failures:
+        result["error"] = (
+            f"{len(nested_failures)} embedded nested plist value(s) contained PII "
+            f"that could not be re-serialised and remain un-redacted in the output: "
+            f"{nested_failures}"
+        )
+
     changed = bool(redacted or regex_hits)
     if changed:
         try:
@@ -355,7 +483,10 @@ def sanitize_plist(filepath: Path) -> dict:
                 f"{len(regex_hits)} regex PII hits"
             )
         except Exception as e:
-            result["error"] = f"Failed to write: {e}"
+            # Do not clobber an already-recorded nested-reserialize failure
+            # (#12) -- append so both fail-closed signals survive.
+            write_err = f"Failed to write: {e}"
+            result["error"] = f"{result['error']}; {write_err}" if result.get("error") else write_err
 
     result["hash_after"] = _sha256(filepath)
     return result

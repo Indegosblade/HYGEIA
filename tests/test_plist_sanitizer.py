@@ -698,6 +698,214 @@ def test_integer_phone_under_phone_key_is_redacted():
         assert sanitized["StorefrontID"] == "143441"
 
 
+# ---------------------------------------------------------------------------
+# Nested-plist re-serialization failure -- fail closed, not silently
+# "handled" (audit finding #12)
+# ---------------------------------------------------------------------------
+
+def test_nested_plist_dumps_failure_not_counted_as_handled(monkeypatch):
+    """If plistlib.dumps() cannot re-serialise a nested plist after PII was
+    found and redacted in the in-memory copy, the run must NOT record that
+    PII as a normal 'handled' hit while the original, un-redacted bytes are
+    kept in the output -- it must be surfaced as an explicit failure
+    instead (audit #12)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.facetime.bag.plist"
+
+        nested = {"AccountInfo": "victim@example.com"}
+        nested_bytes = plistlib.dumps(nested, fmt=plistlib.FMT_XML)
+        original_nested_bytes = nested_bytes
+
+        data = {"CachedBag": nested_bytes, "Version": "1.0"}
+        _write_plist(plist_path, data)
+
+        def _always_raise(*args, **kwargs):
+            raise ValueError("simulated plistlib re-serialisation failure")
+
+        # Patches the plistlib module's dumps for every caller (there is
+        # only one live module object), simulating a nested plist value
+        # whose sanitized copy cannot be re-serialised in any format.
+        monkeypatch.setattr(plistlib, "dumps", _always_raise)
+
+        result = sanitize_plist(plist_path)
+
+        # The email must NOT appear as a normal, silently-"handled" hit --
+        # that would claim the PII was removed from the output when it
+        # demonstrably was not.
+        assert not any(t == "email" for _, t in result["regex_hits"]), (
+            f"email must not be recorded as a normal handled hit when "
+            f"re-serialisation failed: {result['regex_hits']}"
+        )
+        # The failure must be surfaced explicitly, not silently dropped.
+        assert any(t == "nested_plist_reserialize_failed" for _, t in result["regex_hits"]), (
+            f"Expected an explicit failure marker in regex_hits, got: {result['regex_hits']}"
+        )
+        assert result.get("error"), (
+            "Top-level result must surface the nested re-serialisation "
+            "failure (fail closed) via result['error']"
+        )
+
+        # The bytes are truthfully unchanged -- but that is now honestly
+        # reflected by the failure marker/error above rather than hidden
+        # behind a false "handled" count.
+        sanitized = _read_plist(plist_path)
+        assert sanitized["CachedBag"] == original_nested_bytes, (
+            "Original nested bytes should be unchanged when re-serialisation fails"
+        )
+
+
+def test_nested_plist_dumps_success_leaves_no_failure_marker(monkeypatch):
+    """Sanity check for the #12 fix: the fail-closed path must only engage
+    when plistlib.dumps() actually raises. A normal, successful nested-plist
+    redaction must be unaffected -- no failure marker, no error field."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.facetime.bag.plist"
+
+        nested = {"AccountInfo": "victim2@example.com"}
+        nested_bytes = plistlib.dumps(nested, fmt=plistlib.FMT_XML)
+        data = {"CachedBag": nested_bytes, "Version": "1.0"}
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hit_types = [t for _, t in result["regex_hits"]]
+        assert "email" in hit_types, f"Expected email hit, got: {result['regex_hits']}"
+        assert "nested_plist_reserialize_failed" not in hit_types
+        assert not result.get("error"), f"Unexpected error on success path: {result.get('error')}"
+
+        sanitized = _read_plist(plist_path)
+        inner = plistlib.loads(sanitized["CachedBag"])
+        assert "victim2@example.com" not in inner["AccountInfo"]
+
+
+# ---------------------------------------------------------------------------
+# Float / non-phone-numeric GPS-location scanning (audit finding #13)
+# ---------------------------------------------------------------------------
+
+def test_gps_float_latitude_longitude_redacted():
+    """Audit #13: floats were explicitly excluded from every PII check
+    ('bool, float, datetime — leave untouched'), so a binary plist storing
+    GPS coordinates as <real> values under lastKnownLatitude/
+    lastKnownLongitude (locationd/routined/Maps state caches) survived
+    sanitization completely untouched. Both coordinates must now be
+    detected and zeroed, while an unrelated float is left alone."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.routined.plist"
+        data = {
+            "lastKnownLatitude": 37.7749,
+            "lastKnownLongitude": -122.4194,
+            "HorizontalAccuracy": 5.0,   # plausible non-coordinate float, unrelated key
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hit_types = [t for _, t in result["regex_hits"]]
+        assert "gps_coord" in hit_types, (
+            f"Expected gps_coord hit for float lat/long, got: {result['regex_hits']}"
+        )
+
+        sanitized = _read_plist(plist_path)
+        assert sanitized["lastKnownLatitude"] != 37.7749, (
+            f"Latitude float must not survive sanitization, got {sanitized['lastKnownLatitude']!r}"
+        )
+        assert sanitized["lastKnownLongitude"] != -122.4194, (
+            f"Longitude float must not survive sanitization, got {sanitized['lastKnownLongitude']!r}"
+        )
+        # The fix targets coordinates, not every float in the file.
+        assert sanitized["HorizontalAccuracy"] == 5.0
+
+
+def test_gps_float_pair_in_list_redacted():
+    """A [lat, lng] coordinate pair stored as a plist array (list items have
+    no key name) must also be scanned by content -- the universal Pass 2
+    scan is not supposed to be dict-values-only (#13)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.Maps.plist"
+        data = {
+            "RecentSearchCoordinates": [37.7749, -122.4194],
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hit_types = [t for _, t in result["regex_hits"]]
+        assert "gps_coord" in hit_types, (
+            f"Expected gps_coord hit for coordinate list, got: {result['regex_hits']}"
+        )
+
+        sanitized = _read_plist(plist_path)
+        coords = sanitized["RecentSearchCoordinates"]
+        assert 37.7749 not in coords, f"Latitude survived in list: {coords}"
+        assert -122.4194 not in coords, f"Longitude survived in list: {coords}"
+
+
+def test_low_precision_coordinate_under_location_key_redacted():
+    """A coordinate rounded to too few decimal digits to match the
+    gps_coord regex on content alone (e.g. 37.5) must still be redacted
+    when the key name itself is unambiguously a location field -- mirrors
+    the existing phone-hint integer fallback, but for location floats
+    (#13). A same-value float under an unrelated key must be untouched."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.locationd.plist"
+        data = {
+            "Latitude": 37.5,
+            "TemperatureReading": 37.5,   # same value, unrelated key
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hit_types = [t for _, t in result["regex_hits"]]
+        assert "gps_coord" in hit_types, (
+            f"Expected gps_coord hit for location-keyed low-precision "
+            f"coordinate, got: {result['regex_hits']}"
+        )
+
+        sanitized = _read_plist(plist_path)
+        assert sanitized["Latitude"] == 0.0, (
+            f"Location-keyed low-precision coordinate should be zeroed, "
+            f"got {sanitized['Latitude']!r}"
+        )
+        assert sanitized["TemperatureReading"] == 37.5, (
+            "Same value under an unrelated key must be left untouched"
+        )
+
+
+def test_scaled_integer_coordinate_under_location_key_redacted():
+    """Some apps store GPS as fixed-point/scaled integers (e.g. an
+    E7-format latitude*1e7), which has no decimal point for gps_coord to
+    match against -- a location-hint key name is the only usable signal for
+    these 'non-phone numeric' values (#13). A same-magnitude integer under
+    an unrelated key must be left untouched (key-hint scoped, not a
+    blanket integer wipe)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        plist_path = Path(tmpdir) / "com.apple.locationd.plist"
+        data = {
+            "LatitudeE7": 377749000,
+            "GenericCounter": 377749000,
+        }
+        _write_plist(plist_path, data)
+
+        result = sanitize_plist(plist_path)
+
+        hit_types = [t for _, t in result["regex_hits"]]
+        assert "gps_coord" in hit_types, (
+            f"Expected gps_coord hit for location-keyed scaled integer, "
+            f"got: {result['regex_hits']}"
+        )
+
+        sanitized = _read_plist(plist_path)
+        assert sanitized["LatitudeE7"] == 0, (
+            f"Location-keyed scaled-integer coordinate should be zeroed, "
+            f"got {sanitized['LatitudeE7']!r}"
+        )
+        assert sanitized["GenericCounter"] == 377749000, (
+            "Same-magnitude integer under an unrelated key must be left "
+            "untouched (the fix is key-hint scoped, not a blanket integer wipe)"
+        )
+
+
 if __name__ == "__main__":
     test_sensitive_key_detection()
     test_plist_sanitization()
@@ -723,4 +931,12 @@ if __name__ == "__main__":
     test_nested_plist_bytes_multiple_pii_types()
     test_mac_address_used_as_dict_key_is_redacted()
     test_integer_phone_under_phone_key_is_redacted()
+    # test_nested_plist_dumps_failure_not_counted_as_handled and
+    # test_nested_plist_dumps_success_leaves_no_failure_marker require the
+    # pytest `monkeypatch` fixture and are not runnable from this manual
+    # entry point -- run via `pytest tests/test_plist_sanitizer.py`.
+    test_gps_float_latitude_longitude_redacted()
+    test_gps_float_pair_in_list_redacted()
+    test_low_precision_coordinate_under_location_key_redacted()
+    test_scaled_integer_coordinate_under_location_key_redacted()
     print("All tests passed.")
