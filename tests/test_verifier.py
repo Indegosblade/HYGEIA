@@ -179,8 +179,8 @@ def test_manifest_files_skipped_by_scanner():
     d = tempfile.mkdtemp()
     root = Path(d)
     # Write a manifest.json that contains phone numbers that were logged
-    (root / "manifest.json").write_text('{"phone": "1-604-419-2133", "found": true}')
-    (root / "MANIFEST.txt").write_text("phone=16044192133 found=1")
+    (root / "manifest.json").write_text('{"phone": "1-604-555-0142", "found": true}')
+    (root / "MANIFEST.txt").write_text("phone=16045550142 found=1")
     matches = scan_text_files(root)
     assert len(matches) == 0, (
         f"manifest files should be skipped, got {len(matches)} matches: "

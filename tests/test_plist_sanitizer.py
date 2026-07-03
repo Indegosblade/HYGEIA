@@ -663,7 +663,7 @@ def test_mac_address_used_as_dict_key_is_redacted():
 
 
 def test_integer_phone_under_phone_key_is_redacted():
-    """A phone number stored as a bare integer (e.g. 16044192133) under a key
+    """A phone number stored as a bare integer (e.g. 16045550142) under a key
     whose name contains a phone hint but is NOT caught by Pass 1 key-based
     sanitization (i.e. no SENSITIVE_KEY_PATTERNS match) must be zeroed out by
     the regex scan in Pass 2.
@@ -675,7 +675,7 @@ def test_integer_phone_under_phone_key_is_redacted():
         plist_path = Path(tmpdir) / "com.apple.itunescloud.plist"
         data = {
             "DSPersonID": 12345678,            # generic int — must be untouched
-            "MobileDeviceContact": 16044192133, # phone int under mobile-hint key
+            "MobileDeviceContact": 16045550142, # phone int under mobile-hint key
             "StorefrontID": "143441",
         }
         _write_plist(plist_path, data)
