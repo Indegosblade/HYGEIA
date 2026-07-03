@@ -35,6 +35,15 @@ _FTS_VIRTUAL_RE = re.compile(
     r"CREATE\s+VIRTUAL\s+TABLE.+USING\s+fts", re.IGNORECASE | re.DOTALL
 )
 
+# Matches an explicit ``content`` option in a ``CREATE VIRTUAL TABLE ... USING
+# fts3/4/5(...)`` statement: ``content=''`` (contentless) or
+# ``content='other_table'`` (external content). FTS3/4 support the same
+# option. Its *absence* means FTS is managing its own internal content shadow
+# table (``_content``), which a rebuild can always regenerate the index from.
+_FTS_CONTENT_OPTION_RE = re.compile(
+    r"""\bcontent\s*=\s*(?:'([^']*)'|"([^"]*)")""", re.IGNORECASE
+)
+
 
 def _fts_base_tables(master_rows) -> set:
     """Return the names of FTS virtual tables from (name, sql) sqlite_master rows.
@@ -51,6 +60,45 @@ def _fts_base_tables(master_rows) -> set:
         if sql and _FTS_VIRTUAL_RE.search(sql):
             bases.add(name)
     return bases
+
+
+def _fts_uncleanable_bases(master_rows, fts_bases) -> set:
+    """Return the subset of ``fts_bases`` that are structurally contentless or
+    external-content FTS tables — i.e. whose ``CREATE VIRTUAL TABLE`` SQL in
+    ``sqlite_master`` declares an explicit ``content=`` option.
+
+    This is a STRUCTURAL check, made directly on the DDL text, so it holds
+    regardless of the SQLite version running underneath. That independence
+    matters: whether ``INSERT INTO base(base) VALUES('rebuild')`` raises for
+    a contentless table is a SQLite-version-dependent implementation detail.
+    Newer SQLite raises; older SQLite (e.g. the version bundled with Python
+    3.10) can silently no-op instead — and a bare "rebuild didn't raise" was
+    previously read as "index is clean", which is a false clean on those
+    older versions (findings #16/#18). Detecting the option from the DDL
+    means the fail-closed decision no longer depends on that behavior at all.
+
+    Both forms are treated identically and conservatively:
+
+    - ``content=''`` (contentless): FTS5 stores no row text anywhere —
+      neither in an internal nor external table — only the tokenized
+      postings survive in the ``_data``/``_idx`` shadow tables. There is
+      literally no content for ``rebuild`` to regenerate the index from, so
+      the pre-redaction tokens can persist no matter what ``rebuild`` does.
+    - ``content='other_table'`` (external content): the row text lives in a
+      separately named table that this function does not itself confirm was
+      redacted before rebuild would run, and FTS5's handling of rebuild
+      against external content is exactly the kind of edge case whose
+      behavior has shifted across SQLite versions. Treating it the same as
+      the contentless case is the conservative, fail-closed choice for a
+      forensic PII sanitizer: don't guess, flag it.
+    """
+    uncleanable = set()
+    sql_by_name = {row[0]: row[1] for row in master_rows}
+    for base in fts_bases:
+        sql = sql_by_name.get(base)
+        if sql and _FTS_CONTENT_OPTION_RE.search(sql):
+            uncleanable.add(base)
+    return uncleanable
 
 
 def _redact_cell(value, pattern, pii_name: str):
@@ -90,7 +138,8 @@ def _redact_cell(value, pattern, pii_name: str):
     return value, False
 
 
-def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result) -> bool:
+def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result,
+                              uncleanable_bases=frozenset()) -> bool:
     """Rebuild or safely clear FTS3/4/5 shadow index tables. Return True iff all
     FTS indexes were cleaned without corrupting the database.
 
@@ -103,17 +152,26 @@ def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result) -
     "malformed", so on any integrity failure we ROLL BACK the delete (preserving
     the redactions committed earlier) and flag the DB incomplete instead of
     shipping a corrupt or silently PII-leaking database (findings #16, #18).
+
+    ``uncleanable_bases`` (from ``_fts_uncleanable_bases``) names bases that are
+    structurally contentless/external-content per their DDL. For those we never
+    attempt — and so never trust — the rebuild shortcut: whether it raises is a
+    SQLite-version-dependent detail (older SQLite can silently no-op instead of
+    raising), and a rebuild that doesn't raise is not proof the tokenized index
+    was actually purged. Those bases go straight to the integrity-gated
+    shadow-clear path below, on every SQLite version alike.
     """
     all_clean = True
     for base in sorted(fts_bases):
         if base not in existing_tables:
             continue
         qbase = quote_identifier(base)
-        try:
-            cursor.execute(f"INSERT INTO {qbase}({qbase}) VALUES('rebuild')")
-            continue  # index rebuilt from redacted content
-        except sqlite3.Error:
-            pass
+        if base not in uncleanable_bases:
+            try:
+                cursor.execute(f"INSERT INTO {qbase}({qbase}) VALUES('rebuild')")
+                continue  # index rebuilt from redacted content
+            except sqlite3.Error:
+                pass
 
         shadows = [f"{base}{suf}" for suf in FTS_SHADOW_SUFFIXES
                    if f"{base}{suf}" in existing_tables]
@@ -129,6 +187,25 @@ def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result) -
             chk = conn.execute("PRAGMA integrity_check").fetchone()
             if chk is not None and chk[0] == "ok":
                 conn.execute("RELEASE hygeia_fts")
+                if base in uncleanable_bases:
+                    # The best-effort wipe happened to leave a structurally
+                    # valid (now-empty) index on THIS SQLite build, but that is
+                    # not something we take as proof of clean: whether a raw
+                    # shadow-table DELETE trips integrity_check is itself the
+                    # kind of implementation detail that can vary by SQLite
+                    # version, and this base was never rebuilt-and-verified
+                    # from content in the first place. Flag it unconditionally
+                    # so the fail-closed decision for contentless/external FTS
+                    # tables stays structural, not contingent on this DELETE's
+                    # outcome on any particular SQLite build.
+                    all_clean = False
+                    result.setdefault("fts_cleanup_incomplete", []).append(base)
+                    log.warning(
+                        f"{base} is a contentless/external-content FTS table — "
+                        f"shadow rows cleared without corrupting the index, but "
+                        f"flagging incomplete regardless since it was never "
+                        f"rebuilt-and-verified from content"
+                    )
             else:
                 conn.execute("ROLLBACK TO hygeia_fts")
                 conn.execute("RELEASE hygeia_fts")
@@ -500,6 +577,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         tables = [row[0] for row in master_rows]
         table_set = set(tables)
         fts_bases = _fts_base_tables(master_rows)
+        fts_uncleanable = _fts_uncleanable_bases(master_rows, fts_bases)
         fts_shadow = {f"{b}{suf}" for b in fts_bases for suf in FTS_SHADOW_SUFFIXES
                       if f"{b}{suf}" in table_set}
 
@@ -643,7 +721,11 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         # FTS index cleanup: rebuild from redacted content (FTS3/4/5), or clear
         # the shadow tables under an integrity-gated savepoint that rolls back
         # and flags on corruption instead of shipping a broken DB (#16, #18).
-        fts_ok = _clean_fts_shadow_tables(conn, cursor, fts_bases, table_set, result)
+        # Contentless/external-content bases (fts_uncleanable) skip the rebuild
+        # shortcut entirely — that decision is structural (from the DDL), not
+        # dependent on whether rebuild happens to raise on this SQLite version.
+        fts_ok = _clean_fts_shadow_tables(conn, cursor, fts_bases, table_set, result,
+                                           fts_uncleanable)
         if not fts_ok:
             result["error"] = (
                 "FTS index cleanup incomplete — tokenized PII may remain in the "
