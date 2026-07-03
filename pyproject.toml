@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hygeia"
-version = "3.14.0"
+version = "3.15.0"
 description = "Cross-platform forensic PII sanitization — 20 tested handlers for Chrome, Firefox, iOS, Android, Windows, macOS, Linux + generic SQLite/text scanning"
 readme = "README.md"
 license = {text = "PolyForm-Noncommercial-1.0.0"}
