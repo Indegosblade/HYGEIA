@@ -8,9 +8,9 @@
 
 Forensic-grade PII sanitization that actually understands what it's looking at.
 
-20 schema-aware handlers detect and surgically clean Chrome profiles, Firefox databases, iOS filesystem dumps, Android extractions, and Windows forensic artifacts — by table signature, not filename guessing. Everything else gets full regex + column-name scanning as a safety net. Zero external pip dependencies.
+21 schema-aware handlers detect and surgically clean Chrome profiles, Firefox databases, iOS filesystem dumps, Android extractions, and Windows forensic artifacts — by table signature, not filename guessing. Everything else gets full regex + column-name scanning as a safety net. Zero external pip dependencies.
 
-**Platforms tested in-house:** Chrome/Chromium (4 handlers) · Firefox (3) · iOS (8) · Android (3) · Windows (1 + filesystem rules) · macOS · Linux
+**Platforms tested in-house:** Chrome/Chromium (4 handlers) · Firefox (3) · iOS (10) · Android (3) · Windows (1 + filesystem rules) · macOS · Linux
 
 **Compliance:** HIPAA Safe Harbor · GDPR Article 4/9 · CCPA — with per-run coverage reporting.
 
@@ -93,8 +93,10 @@ hygeia --list-patterns
 | `--normalize-timestamps` | Set all file timestamps to epoch (defeats timeline analysis) |
 | `--skip-verify` | Skip post-sanitization verification |
 | `--skip-exif` | Skip EXIF metadata stripping |
+| `--skip-forensic` | Skip anti-forensic hardening (LevelDB, caches, swap, timestamps) |
 | `--manifest PATH`, `-m` | Custom path for JSON audit manifest |
 | `--verbose`, `-v` | Detailed logging |
+| `--workers N`, `-w` | Parallel workers for independent sanitization tasks. `1` = sequential (default), `0` = auto-detect (`os.cpu_count()`), `>1` = explicit thread pool size |
 
 ### Exit Codes
 
@@ -132,13 +134,15 @@ All patterns live in a single JSON source of truth (`hygeia/rules/pii_patterns.j
 
 | Category | Patterns | Examples |
 |----------|----------|----------|
-| **Identity** | 12 | SSN, UK NIN, Indian PAN/Aadhaar, US passport, driver's license, Canadian SIN, Australian TFN, US ITIN, EIN |
+| **Identity** | 17 | Email, US/international phone, SSN, UK NIN, Indian PAN/Aadhaar, US ITIN, Brazilian CPF, Mexican CURP, South Korean RRN, Canadian SIN/Australian TFN, Japanese My Number, IMEI, IMSI, device name, Apple ID |
 | **Location** | 4 | GPS coordinates (incl. sub-1° values like `-0.1278`), IPv4, IPv6 (full + compressed `::` notation), MAC addresses |
-| **Financial** | 6 | Credit cards (incl. spaced/hyphenated Amex), IBAN, SWIFT/BIC, US routing numbers, Bitcoin addresses, Ethereum addresses |
-| **Credentials** | 8 | AWS access keys, AWS secret keys, GitHub tokens, Slack tokens, JWT tokens, generic API keys, private key headers, password key-value pairs |
-| **Crypto** | 4 | Bitcoin (legacy + bech32), Ethereum, plus Monero/Solana/Cardano (context-dependent) |
-| **Healthcare** | 3 | NPI (standalone + context), DEA numbers, Medicare MBI |
+| **Financial** | 7 | Credit cards (incl. spaced/hyphenated Amex), IBAN, SWIFT/BIC, US EIN, US routing numbers, CUSIP, ISIN |
+| **Credentials** | 18 | JWT tokens, AWS access keys, GitHub/GitLab tokens, Slack tokens, Stripe/OpenAI/Twilio/SendGrid keys, npm/PyPI/Docker/DigitalOcean/Shopify tokens, Telegram bot tokens, generic API keys, URL-embedded credentials, private key headers |
+| **Crypto** | 7 | Bitcoin (legacy + bech32), Ethereum, Litecoin, Ripple, plus Monero/Solana/Cardano (context-dependent) |
+| **Healthcare** | 4 | NPI (standalone + context), DEA numbers, Medicare MBI, NDC (National Drug Code) |
 | **Vehicle** | 2 | VIN (17-char ISO 3779), UK license plates |
+
+Patterns above are the always-on, content-based regexes (59 total). A further 9 context-gated patterns (below) only fire near a confirming keyword — US passport and driver's license numbers, for instance, live there rather than in Identity, since a bare short digit sequence is too ambiguous to flag on its own.
 
 ### Context-Dependent Patterns
 
@@ -158,7 +162,7 @@ These patterns only fire when a nearby keyword confirms the context — short di
 
 ### Column-Name Detection
 
-60+ column names treated as inherently sensitive regardless of content — any non-empty value replaced with `[REDACTED]`:
+150+ column names treated as inherently sensitive regardless of content — any non-empty value replaced with `[REDACTED]`:
 
 `email`, `username`, `password`, `phone`, `address`, `street`, `city`, `zip`, `first_name`, `last_name`, `full_name`, `ssn`, `credit_card`, `latitude`, `longitude`, `api_key`, `token`, `cookie`, `session`, `encrypted_value`, `ip_address`, `remote_addr`, `mac_address`, `device_id`, `udid`, `serial_number`, `imei`, `account_number`, and more.
 
@@ -189,7 +193,7 @@ History, Login Data, Web Data, Cookies, Shortcuts, Top Sites, Favicons, DIPS, Ne
 
 places.sqlite, cookies.sqlite, formhistory.sqlite, permissions.sqlite, content-prefs.sqlite, key4.db, cert9.db, signons.sqlite, webappsstore.sqlite. Auto-detected by `moz_*` table presence. IndexedDB storage directory deletion. Session restore file deletion. Cache cleanup.
 
-### iOS (8 handlers)
+### iOS (10 handlers)
 
 Messages, Photos.sqlite, Health, Contacts, Safari History/Bookmarks, Notes, knowledgeC, Screen Time, TCC.db. Jailbreak-aware scanning with dynamic detection of Dopamine, palera1n, and RootHide. Preserves jailbreak infrastructure (`/var/jb/`, `/private/preboot/`, package databases) while removing user data. Column-level sanitization for knowledgeC.db (redacts third-party app names, preserves system app usage) and Photos.sqlite (NULLs GPS coordinates, deletes facial recognition data — detection now correctly matches both the pre-iOS-14 (`ZGENERICASSET`) and iOS 14+ (`ZASSET`) schema, either of which is sufficient on its own). SEGB biome stream deletion. Third-party app container cleanup with WAL handling.
 
@@ -199,7 +203,7 @@ contacts2.db, mmssms.db, telephony.db, calendar.db, accounts.db, webview.db. Thu
 
 ### Windows (1 handler + filesystem rules)
 
-WebCacheV01.dat (ESE-based). Prefetch files (.pf), jump lists (.automaticDestinations-ms), LNK files, event logs (.evtx), recycle bin markers ($I/$R files), swap/hibernation files (pagefile.sys, swapfile.sys, hiberfil.sys), thumbnail caches (Thumbcache_*.db).
+WebCacheV01.dat is ESE-based, not SQLite — Python cannot parse ESE natively, so the file is deleted outright by the scanner's delete-pattern match rather than sanitized in place (the `windows_webcache` SQL handler exists for the rare case a database with matching table names shows up in SQLite form, but a genuine WebCacheV01.dat never reaches it). Also covered: prefetch files (.pf), jump lists (.automaticDestinations-ms), LNK files, event logs (.evtx), recycle bin markers ($I/$R files), swap/hibernation files (pagefile.sys, swapfile.sys, hiberfil.sys), thumbnail caches (Thumbcache_*.db).
 
 ### macOS
 
@@ -369,7 +373,7 @@ hygeia/
 ├── scanner.py               File classification engine (DELETE/PRESERVE/SELECTIVE_DB/PLIST/EXIF)
 ├── patterns.py              Central pattern registry — loads pii_patterns.json, compiles regexes, filters by --only/--skip
 ├── sqlite_sanitizer.py      WAL-aware database sanitization — checkpoint → secure_delete → scan → VACUUM; safe identifier quoting, BLOB scanning, FTS3/4/5 fail-closed cleanup, secure-overwrite delete
-├── platform_handlers.py     20 tested schema-aware handlers (Chrome, Firefox, iOS, Android, Windows, macOS) with table-signature auto-detection
+├── platform_handlers.py     21 tested schema-aware handlers (Chrome, Firefox, iOS, Android, Windows, macOS) with table-signature auto-detection
 ├── text_sanitizer.py        JSON, log, CSV/TSV sanitization + shell history deletion; context-pattern redaction (DOB, passwords, AWS keys, ...), fail-closed oversize handling
 ├── filesystem_sanitizer.py  Forensic artifact removal — LevelDB, caches, swap, indexes; symlink-safe timestamp normalization
 ├── forensic_cleaner.py      Anti-forensic hardening — slack space, ADS, extended attributes; symlink containment, concurrent-worker-safe cleanup
@@ -382,11 +386,11 @@ hygeia/
 ├── manifest.py              JSON audit trail generation
 ├── utils.py                 Shared helpers — SQL identifier quoting, symlink containment (`resolve_within`, `is_safe_regular_file`, `safe_utime`)
 └── rules/
-    ├── pii_patterns.json          Single source of truth — 40+ regex patterns in 7 categories
-    ├── delete_patterns.json       34 directory + 40 database + 10 extension patterns
+    ├── pii_patterns.json          Single source of truth — 59 regex patterns + 9 context-gated patterns across 7 categories
+    ├── delete_patterns.json       30 directory + 38 database + 10 extension patterns
     ├── preserve_patterns.json     18 directory + 5 file + 4 extension rules
     ├── selective_db_rules.json    Column-level SQL for knowledgeC, Photos.sqlite, TCC.db
-    └── plist_patterns.json        29 sensitive key patterns + path-based rules
+    └── plist_patterns.json        28 sensitive key patterns + path-based rules
 ```
 
 Zero external pip dependencies. Stdlib only. Optional system exiftool for image metadata.

@@ -4,6 +4,15 @@ All notable changes to HYGEIA are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+- Corrected drifted counts in README/ABOUT that no longer matched `hygeia/rules/*.json` and `platform_handlers.py`: handler total (20 → 21), iOS handler count (8 → 10, the README/ABOUT platform lists already named all 10), regex pattern counts per category, sensitive-column count (60+ → 150+), delete-pattern counts.
+- Clarified that `WebCacheV01.dat` (ESE format) is deleted outright, not parsed/sanitized in place — Python cannot read ESE natively and the file never reaches the `windows_webcache` SQL handler in practice.
+- Added `SECURITY.md` (GitHub-issues-based disclosure process) and `CONTRIBUTING.md` (dev setup, required CI checks, PR process).
+- Added `.mailmap` normalizing historical author identities to a single canonical entry.
+- Wiki: corrected the same drifted counts, fixed several inaccurate table-nuke examples and JSON rule-file schema examples on the Platform-Handlers/Custom-Rules pages, and rewrote the Compliance page's per-framework extra-column/extra-table lists to match `hygeia/compliance.py` exactly (the GDPR "extra tables" list previously named tables that don't exist in the code — GDPR mode extends columns only).
+
 ## [3.15.0] - 2026-07-03
 
 45-finding forensic-correctness audit remediation. The core guarantee — HYGEIA never reports a dump clean when it can't prove that — is now actually enforced by the verifier and the CLI, not just asserted in prose.

@@ -32,13 +32,13 @@ PII can survive deletion through multiple mechanisms: SQLite WAL files, database
 
 ### Platform Intelligence
 
-HYGEIA ships with 20 schema-aware database handlers, each tested in-house against real-world databases from that platform:
+HYGEIA ships with 21 schema-aware database handlers, each tested in-house against real-world databases from that platform:
 
 - **Chrome/Chromium** (4 handlers): History, Login Data, Web Data/Autofill, Cookies — detected by table signature, not filename
 - **Firefox** (3 handlers): places.sqlite, formhistory.sqlite, cookies.sqlite — detected by `moz_*` table prefix
-- **iOS** (8 handlers): Messages, Photos.sqlite, Health, Contacts, Safari History/Bookmarks, Notes, knowledgeC, Screen Time, TCC.db
+- **iOS** (10 handlers): Messages, Photos.sqlite, Health, Contacts, Safari History, Safari Bookmarks, Notes, knowledgeC, Screen Time, TCC.db
 - **Android** (3 handlers): contacts2.db, mmssms.db, calendar.db — detected by Android-specific table schemas
-- **Windows** (1 handler): WebCacheV01.dat (ESE-based, Containers/Entries structure)
+- **Windows** (1 handler): WebCacheV01.dat is ESE-based, not SQLite — Python can't parse ESE natively, so the file is deleted outright rather than sanitized in place; the handler exists for a SQLite-format Containers/Entries match, which a genuine WebCacheV01.dat never triggers
 - **macOS**: TCC.db (permission grants), quarantine events, Spotlight indexes
 
 Auto-detection works by table signature — HYGEIA opens the database, reads the schema, and matches against known platform signatures. No reliance on filenames or directory structure. When a database isn't recognized, the generic scanner examines every TEXT column in every table for PII patterns. The detection layer is modular: all rules loaded from JSON configuration files.
@@ -70,9 +70,9 @@ No other sanitization tool implements this complete pipeline.
 
 PII detection operates at three levels simultaneously:
 
-**Regex patterns**: 40+ patterns across 7 categories (identity, location, financial, credentials, crypto, healthcare, vehicle) applied to every TEXT column in every SQLite table and every line of every text file. All patterns defined in a single JSON source of truth (`hygeia/rules/pii_patterns.json`) and selectable individually or by category. Context-dependent patterns (short digit sequences like passport numbers, routing numbers) require nearby keywords within a configurable window to fire, preventing false positives. Multi-pass scanning catches nested PII (URLs embedding emails, etc.) — runs until no new detections found.
+**Regex patterns**: 59 always-on patterns plus 9 context-gated patterns across 7 categories (identity, location, financial, credentials, crypto, healthcare, vehicle) applied to every TEXT column in every SQLite table and every line of every text file. All patterns defined in a single JSON source of truth (`hygeia/rules/pii_patterns.json`) and selectable individually or by category. Context-dependent patterns (short digit sequences like passport numbers, routing numbers) require nearby keywords within a configurable window to fire, preventing false positives. Multi-pass scanning catches nested PII (URLs embedding emails, etc.) — runs until no new detections found.
 
-**Column-name detection**: 60+ column names (email, username, password, phone, address, latitude, longitude, api_key, token, cookie, ssn, credit_card, etc.) trigger blanket redaction regardless of content. This catches PII that doesn't match any regex pattern — a name in a `first_name` column, a street address in an `address` column.
+**Column-name detection**: 150+ column names (email, username, password, phone, address, latitude, longitude, api_key, token, cookie, ssn, credit_card, etc.) trigger blanket redaction regardless of content. This catches PII that doesn't match any regex pattern — a name in a `first_name` column, a street address in an `address` column.
 
 **Table-level rules**: 80+ table names across Chrome, Firefox, Android, iOS, messaging apps, Windows, and macOS are recognized as entirely PII. All rows are deleted, schema is preserved. This is faster and more thorough than row-level scanning for tables that are definitionally personal data.
 
