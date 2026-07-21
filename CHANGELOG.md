@@ -5,6 +5,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Maturity classifier corrected to `Development Status :: 4 - Beta`; handler count in the package description corrected (20 -> 21).
 
 ### Documentation
 - Corrected drifted counts in README/ABOUT that no longer matched `hygeia/rules/*.json` and `platform_handlers.py`: handler total (20 → 21), iOS handler count (8 → 10, the README/ABOUT platform lists already named all 10), regex pattern counts per category, sensitive-column count (60+ → 150+), delete-pattern counts.

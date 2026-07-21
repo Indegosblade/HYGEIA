@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hygeia"
 version = "3.15.0"
-description = "Cross-platform forensic PII sanitization — 20 tested handlers for Chrome, Firefox, iOS, Android, Windows, macOS, Linux + generic SQLite/text scanning"
+description = "Cross-platform forensic PII sanitization — 21 tested handlers for Chrome, Firefox, iOS, Android, Windows, macOS, Linux + generic SQLite/text scanning"
 readme = "README.md"
 license = {text = "PolyForm-Noncommercial-1.0.0"}
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["sanitization", "forensics", "security", "privacy", "pii", "hipaa", "gdpr", "ccpa"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Intended Audience :: Information Technology",
