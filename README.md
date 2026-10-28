@@ -252,7 +252,7 @@ HYGEIA is designed to produce output that withstands examination by forensic too
 | WAL checkpoint + companion file deletion | WAL file carving for deleted records |
 | `PRAGMA secure_delete = ON` | Deleted cell recovery within live database pages |
 | VACUUM rebuild (failure surfaced, never silent) | Freelist page carving from unallocated database pages |
-| FTS3/4/5 shadow table rebuild — fails closed on structurally contentless/external-content tables | Full-text search index data recovery (`*_content`, `*_segments`, `*_data`, `*_idx`) |
+| FTS3/4/5 shadow table rebuild; external-content FTS5 rebuilt from sanitized source and checked against it | Full-text search index data recovery (`*_content`, `*_segments`, `*_data`, `*_idx`); unsupported/contentless cases fail closed |
 | Random-byte overwrite before unlink (databases + WAL/SHM/journal companions) | Forensic carving of deleted database bytes from unallocated disk blocks |
 | LevelDB directory deletion | Chrome localStorage/IndexedDB content carving |
 | Thumbnail cache deletion | Thumbnail persistence after source file deletion |
@@ -265,7 +265,7 @@ HYGEIA is designed to produce output that withstands examination by forensic too
 
 ## Verification
 
-Every sanitization run includes automatic verification (disable with `--skip-verify`). Verification is **fail-closed**: it never reports a dump clean when it could not actually prove that — a missing tool, a locked database, or a narrowed pattern selection blocks a PASSED result exactly like a residual PII match would.
+Every sanitization run includes automatic verification (disable with `--skip-verify`). Verification is **fail-closed**: a missing required tool, an unreadable database, an incomplete scan, or a sanitization action error blocks a PASSED result. A narrowed pattern selection is reported as a scoped result. A pass means no detections under the configured rules after supported checks completed; it does not prove that every possible form of personal data has been removed.
 
 1. **Content scan**: every surviving text file, and the full content of every SQLite database — all tables, all columns regardless of declared type (TEXT/BLOB/INTEGER/REAL), all rows, no row cap — is regex-scanned for the full set of PII patterns. BLOB/bytes cells are UTF-8 decoded before matching, so PII stored in a column typed as binary is still caught. Databases are opened strictly read-only (`mode=ro`); verification never writes to, VACUUMs, or otherwise mutates the artifact it's checking.
 2. **Freelist inspection**: every SQLite database is opened read-only and checked for non-zero freelist page counts. Any non-zero freelist is always reported as a finding — verification no longer attempts its own VACUUM and silently drops the finding when that VACUUM is blocked by a lock (which used to happen for e.g. a Chrome WAL lock on "Login Data").
@@ -274,9 +274,11 @@ Every sanitization run includes automatic verification (disable with `--skip-ver
 
 A run ends in one of three states:
 
-- **PASSED** — zero PII findings, zero freelist findings, zero EXIF failures, and every check ran to completion. Exit code 0.
+- **PASSED** — zero PII findings, zero freelist findings, zero EXIF failures, no sanitization action errors, and every configured check ran to completion. Exit code 0.
 - **FAILED (findings)** — one or more residual PII, freelist, or EXIF findings. Exit code 2.
-- **FAILED (incomplete)** — every check that *did* run found nothing, but at least one check could not be completed at all: exiftool missing, a database locked/corrupt/encrypted and unreadable, a file or database too large to scan, or a `--only`/`--skip-patterns` run that narrowed the categories checked. HYGEIA prints exactly which checks are incomplete and why, and exits code 2 — it will not print "PASSED" when it cannot back that up.
+- **FAILED (incomplete)** — at least one sanitization action failed or a check could not complete: for example exiftool missing with images present, a locked/corrupt/encrypted database, or a file too large to scan. HYGEIA records incomplete checks and exits code 2.
+
+With `--skip-verify` (or a dry run), verification is **SKIPPED** and the manifest records `performed: false`, `passed: false`. The explicit skip retains exit code 0 on otherwise successful runs. It is never a clean verification result. Manifests preserve incomplete-check evidence and the selected scope.
 
 A `--only`/`--skip-patterns` run also carries a **scope** annotation: since it only checked the selected categories, a pass is reported as "PASSED for scoped categories (...) only — NOT a full-clean certification," never as an unqualified clean bill of health.
 
@@ -292,8 +294,15 @@ from pathlib import Path
 # Generic database sanitization
 from hygeia.sqlite_sanitizer import sanitize_database_generic
 result = sanitize_database_generic(Path("any_database.db"))
+if result.get("error"):
+    raise RuntimeError("Database sanitization incomplete; inspect the local audit result")
 print(f"Redacted {result['rows_redacted']} rows, found: {result['pii_types_found']}")
 # => Redacted 847 rows, found: ['email', 'phone', 'sensitive_column:username']
+
+# integrity_post checks SQLite structure, independently of redaction completion.
+# errors_count counts failed operations; errors keeps at most 100 value-free samples.
+# Row updates continue after a rejection, but any unhandled rejection sets error.
+# WITHOUT ROWID / fully shadowed rowid addressing is explicitly unsupported.
 
 # Platform-aware database sanitization (auto-detects Chrome, Firefox, iOS, etc.)
 from hygeia.platform_handlers import sanitize_with_platform_detection

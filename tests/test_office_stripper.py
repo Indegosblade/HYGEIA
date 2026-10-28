@@ -187,6 +187,7 @@ class TestAuthorAndCustomStripping:
 #       file outside the sanitized output tree.
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("symlink_capable")
 class TestSymlinkTraversalWrite:
 
     def test_directory_skips_symlink_and_leaves_target_untouched(self, tmp_path):

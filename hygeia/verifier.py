@@ -87,6 +87,7 @@ class VerificationResult:
     scope: str | None = None
     files_scanned: int = 0
     databases_inspected: int = 0
+    performed: bool = True
 
     @property
     def total_findings(self):
@@ -288,6 +289,17 @@ def _is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
             return True
 
     return False
+
+
+def is_false_positive(path: str, pattern_name: str, match_text: str) -> bool:
+    """Public policy helper for consumers sharing HYGEIA's verification rules.
+
+    ``path`` may identify a file or a ``file:table.column`` database location.
+    A True result means this particular detector match is suppressed by the
+    current policy; it is not a claim that the value is free of all PII.
+    The historical private helper remains available for compatibility.
+    """
+    return _is_false_positive(path, pattern_name, match_text)
 
 
 def _context_matches(text: str, pos_start: int, pos_end: int,

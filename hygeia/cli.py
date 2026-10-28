@@ -379,6 +379,15 @@ def main():
     if not args.skip_verify and not args.dry_run:
         print("[6/7] Verifying sanitization...")
         verification = verify_sanitization(work_path)
+        for action in all_actions:
+            if action.get("error") or action.get("errors") or action.get("success") is False:
+                verification.incomplete.append({
+                    "check": "sanitization",
+                    "path": action.get("path", "unknown"),
+                    "reason": "sanitization action reported an error; review its audit result",
+                })
+        if verification.incomplete:
+            verification.passed = False
         if verification.scope:
             print(f"  SCOPED to {verification.scope} — PII outside these categories was NOT checked")
         if verification.incomplete:
@@ -406,7 +415,7 @@ def main():
     else:
         print("[6/7] Verification: skipped")
         from .verifier import VerificationResult
-        verification = VerificationResult()
+        verification = VerificationResult(passed=False, performed=False)
     print()
 
     # [7/7] Manifest
@@ -428,7 +437,7 @@ def main():
     print(f"Databases sanitized: {manifest['summary']['databases_sanitized']}")
     print(f"Plists sanitized:    {manifest['summary']['plists_sanitized']}")
     print(f"Space freed:         {manifest['summary']['bytes_removed'] / 1024 / 1024:.0f} MB")
-    verify_summary = "PASSED" if verification.passed else "FAILED"
+    verify_summary = ("PASSED" if verification.passed else "FAILED") if verification.performed else "SKIPPED"
     if verification.incomplete:
         verify_summary += f" ({len(verification.incomplete)} incomplete check(s))"
     if verification.scope:
@@ -445,7 +454,7 @@ def main():
             print(f"  Gaps:    {', '.join(comp_report['gaps'])}")
     print()
 
-    if not verification.passed and not args.dry_run:
+    if not verification.passed and verification.performed and not args.dry_run:
         if verification.incomplete and verification.total_findings == 0:
             print("WARNING: Verification could NOT be completed "
                   f"({len(verification.incomplete)} check(s) did not run). "

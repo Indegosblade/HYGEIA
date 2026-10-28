@@ -7,6 +7,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 - Maturity classifier corrected to `Development Status :: 4 - Beta`; handler count in the package description corrected (20 -> 21).
 
+### Fixed
+- SQLite redaction reports bounded, value-free error evidence when reads, updates, or table deletions cannot complete, continues later rows after a rejection, and detects trigger-ignored updates. Column reads use bounded batches and avoid user columns that shadow SQLite rowid aliases. Structural integrity no longer masks incomplete redaction (#39, #42).
+- Platform handlers propagate table/column failures, VACUUM failure, and failed residual sweeps. The CLI treats sanitizer action errors as incomplete verification; saved manifests preserve scope and incomplete checks. Skipped verification is recorded as skipped, never passed (#42).
+- External-content FTS5 indexes backed by ordinary source tables are rebuilt after source sanitization and checked against that content with SQLite's rank=1 integrity check. Contentless/missing-source/unsupported cases remain fail-closed (#43).
+- Symlink integration tests probe Windows privileges and skip when this account cannot create symlinks.
+
+### Added
+- Public `hygeia.verifier.is_false_positive()` policy helper; the historical private helper remains compatible for existing consumers.
+
 ### Documentation
 - Corrected drifted counts in README/ABOUT that no longer matched `hygeia/rules/*.json` and `platform_handlers.py`: handler total (20 → 21), iOS handler count (8 → 10, the README/ABOUT platform lists already named all 10), regex pattern counts per category, sensitive-column count (60+ → 150+), delete-pattern counts.
 - Clarified that `WebCacheV01.dat` (ESE format) is deleted outright, not parsed/sanitized in place — Python cannot read ESE natively and the file never reaches the `windows_webcache` SQL handler in practice.
