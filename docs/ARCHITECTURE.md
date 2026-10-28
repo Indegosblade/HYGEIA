@@ -31,8 +31,8 @@ separate and may remove complete artifacts.
 ## Extend policy
 
 Packaged JSON changes are code changes: use a local checkout, synthetic fixtures,
-and review. There is no CLI custom-rules-directory flag. The authoritative schemas
-are in `hygeia/rules/`; preserve their actual keys and test matches and near misses.
+and review. There is no CLI custom-rules-directory flag. Follow the structure of
+the JSON files in `hygeia/rules/`; preserve their keys and test matches and near misses.
 
 Add database signatures and handlers in `platform_handlers.py`, checking their
 interaction with generic processing. Keep inventory in `sqlite_catalog.py` and
