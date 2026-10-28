@@ -5,6 +5,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Development package version 3.15.1: literal SQLite carrier enumeration, complete
+  generated/hidden-column discovery, shared sanitizer/verifier text-byte policy,
+  and FTS storage classification using module/configuration/layout rather than
+  wildcard names. Unsupported matched read-only carriers fail closed (#45).
 - Maturity classifier corrected to `Development Status :: 4 - Beta`; handler count in the package description corrected (20 -> 21).
 
 ### Fixed

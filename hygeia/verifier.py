@@ -17,6 +17,7 @@ from pathlib import Path
 
 from . import sqlite_sanitizer, exif_stripper
 from .patterns import load_patterns, get_default_registry, PatternRegistry
+from .sqlite_catalog import table_inventory, text_variants
 from .utils import quote_identifier
 
 log = logging.getLogger("hygeia.verifier")
@@ -417,24 +418,6 @@ def _ro_uri(db_path: Path) -> str:
     return db_path.resolve().as_uri() + "?mode=ro"
 
 
-def _coerce_to_text(value) -> str | None:
-    """Best-effort decode of a SQLite cell value to text for PII matching.
-
-    SQLite is dynamically typed, so a column of any declared affinity can hold
-    strings or BLOBs that carry text PII (#23). BLOB/bytes values are decoded
-    utf-8 (errors ignored) before matching. Pure numeric cells are not text and
-    are not scanned.
-    """
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        try:
-            return bytes(value).decode("utf-8", errors="ignore")
-        except Exception:
-            return None
-    return None
-
-
 def scan_sqlite_freelist(db_path: Path, incomplete: list | None = None) -> list[str]:
     """
     Inspect SQLite free pages for recoverable (deleted-row) PII.
@@ -537,17 +520,15 @@ def _scan_sqlite_column(cursor, db, dump_path, table, col_name,
                 rowid, value = row[0], row[1]
             else:
                 rowid, value = row_index, row[0]
-            text = _coerce_to_text(value)
-            if text is None:
-                continue
-            for name, pattern in reg.regex_patterns.items():
-                for m in pattern.finditer(text):
-                    if not _is_false_positive(qualified_path, name, m.group()):
-                        matches.append(PIIMatch(qualified_path, name, m.group(), rowid))
-            ctx = _scan_context_patterns(text, qualified_path)
-            for cm in ctx:
-                cm.line_number = rowid
-            matches.extend(ctx)
+            for text, _ in text_variants(value):
+                for name, pattern in reg.regex_patterns.items():
+                    for m in pattern.finditer(text):
+                        if not _is_false_positive(qualified_path, name, m.group()):
+                            matches.append(PIIMatch(qualified_path, name, m.group(), rowid))
+                ctx = _scan_context_patterns(text, qualified_path)
+                for cm in ctx:
+                    cm.line_number = rowid
+                matches.extend(ctx)
 
 
 def scan_sqlite_content(dump_path: Path, incomplete: list | None = None) -> list[PIIMatch]:
@@ -577,10 +558,7 @@ def scan_sqlite_content(dump_path: Path, incomplete: list | None = None) -> list
         try:
             cursor = conn.cursor()
             try:
-                cursor.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-                )
-                tables = [row[0] for row in cursor.fetchall()]
+                tables = table_inventory(conn)
             except sqlite3.Error as e:
                 if incomplete is not None:
                     incomplete.append({
@@ -591,20 +569,20 @@ def scan_sqlite_content(dump_path: Path, incomplete: list | None = None) -> list
                 continue
 
             for table in tables:
-                try:
-                    cursor.execute(f"PRAGMA table_info({quote_identifier(table)})")
-                    columns = cursor.fetchall()
-                except sqlite3.Error as e:
+                info = tables[table]
+                if info.derived:
+                    continue
+                if info.module and info.content == "":
                     if incomplete is not None:
                         incomplete.append({
                             "check": "sqlite_content",
                             "path": f"{db}:{table}",
-                            "reason": f"table schema could not be read: {e}",
+                            "reason": "contentless FTS has no readable source content",
                         })
                     continue
 
                 # Scan ALL columns regardless of declared affinity (#23).
-                for col in columns:
+                for col in info.columns:
                     _scan_sqlite_column(cursor, db, dump_path, table, col[1],
                                         matches, incomplete)
         finally:
