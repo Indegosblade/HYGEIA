@@ -1,9 +1,8 @@
 """
-HYGEIA EXIF Stripper -- bulk image metadata removal.
+HYGEIA image metadata removal through ExifTool.
 
-Uses exiftool to strip all EXIF metadata from images (9 formats).
-Removes GPS coordinates, device make/model, timestamps, camera serial
-numbers, owner names, and all other embedded tags.
+Requests metadata removal for IMAGE_EXTENSIONS. Tool/format support bounds the
+result; this does not redact image pixels or establish universal metadata absence.
 """
 
 import os
@@ -54,12 +53,10 @@ def exiftool_available() -> bool:
 
 def strip_exif_directory(path: Path) -> dict:
     """
-    Strip ALL EXIF metadata from all images in directory recursively.
-    Uses exiftool -all= which removes all metadata tags.
+    Request ExifTool -all= removal for supported images under a directory.
 
-    Returns a result dict. If exiftool is not installed the dict contains
-    ``"skipped": True`` and ``"reason": "exiftool not installed"`` and no
-    metadata is stripped.
+    Returns a result dict. Without ExifTool, records skipped=True and its reason;
+    no metadata is stripped. Inspect reported errors and configured verification.
     """
     result: dict[str, Any] = {
         "action": "exif_strip",
@@ -122,10 +119,14 @@ def strip_single_file(filepath: Path) -> bool:
 
 def verify_exif_stripped(path: Path) -> list[Path]:
     """
-    Verify no images have GPS, PII, or device-identifying EXIF tags remaining.
+    Return supported images with selected residual identifying tags.
 
-    Checks for: GPS tags, Make, Model, SerialNumber, LensSerialNumber,
-    ImageUniqueID, OwnerName, CameraOwnerName, Copyright.
+    Checks GPS tags, Make, Model, SerialNumber, LensSerialNumber, ImageUniqueID,
+    OwnerName, CameraOwnerName, and Copyright. This is a selected-tag check, not
+    proof that every metadata field or image pixel is free of personal information.
+    Direct callers must check ExifTool availability; unavailable tools and some
+    subprocess failures return no findings here. verify_sanitization separately
+    marks missing ExifTool with supported images as incomplete.
     """
     files_with_exif: list[Path] = []
 

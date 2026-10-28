@@ -514,7 +514,7 @@ def test_verify_fails_closed_on_unreadable_database():
 # ── Scoped verification is never an unqualified clean (#43) ───────────────────
 
 def test_scoped_verification_records_scope():
-    """#43: --only/--skip narrows the verifier; the scope is recorded so a
+    """#43: --only/--skip-patterns narrows the verifier; the scope is recorded so a
     partial verify is never presented as a full clean."""
     d = tempfile.mkdtemp()
     root = Path(d)

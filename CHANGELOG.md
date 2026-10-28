@@ -3,8 +3,22 @@
 All notable changes to HYGEIA are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Historical entries are retained as release records. Use the current
+[verification guide](docs/VERIFICATION.md) for present behavior and limits.
 
 ## [Unreleased]
+
+## [3.15.3] - 2026-10-28
+- Validate pattern selectors before processing: unknown/empty names and combined
+  `--only`/`--skip-patterns` are explicit argument errors. Implement documented
+  individual-name exclusions for ordinary and keyword-gated patterns (#51).
+  Preserve category filtering and global context-detector behavior.
+- Make the human-readable verification scope show requested only/skip selectors,
+  including individual exclusions; retain its string/null and scoped truthiness
+  contract rather than treating it as a stable category-list API.
+- Refresh release-pinned installation, contribution/release directions, CLI help,
+  API docstrings, and coverage limits. Document current branch protection and
+  distinguish main documentation from immutable published snapshots.
 
 ## [3.15.2] - 2026-10-28
 - Allow `hygeia --list-patterns` without input

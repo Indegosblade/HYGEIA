@@ -49,8 +49,9 @@ hygeia --help
 
 The Linux quality phase runs Ruff and mypy under `Type Check (mypy)`, then
 Bandit under `Security Scan (bandit)`, before the Python 3.10–3.13 test matrix
-starts on Ubuntu, Windows, and macOS. Those job names preserve the repository's
-existing required checks; each command runs once. Development
+starts on Ubuntu, Windows, and macOS. All 12 matrix jobs and both quality jobs
+are required. Ruff/mypy and Bandit each run once per workflow; tests run in every
+matrix cell. Development
 tools are pinned in `pyproject.toml`; validate dependency updates locally before
 publishing a branch. Superseded runs are canceled, and a failed matrix job
 stops its siblings. If you're changing filesystem or path-handling code, be aware that
@@ -95,16 +96,39 @@ following the same naming convention for a new module.
 
 ## Pull Requests
 
-- PRs require the existing `Type Check (mypy)`, `Security Scan (bandit)`, and
-  `Test (Python 3.12, ubuntu-latest)` checks. The platform matrix waits for
-  both quality jobs to pass. Keep these required context names stable and
-  keep the branch up to date with `main`; do not bypass repository protection.
+- PRs require all 14 checks: `Type Check (mypy)`, `Security Scan (bandit)`, and
+  every `Test (Python VERSION, OS)` combination for Python 3.10–3.13 on
+  `ubuntu-latest`, `windows-latest`, and `macos-latest`. Checks are bound to the
+  GitHub Actions app. The platform matrix waits for both quality jobs.
+  Keep these names stable and the branch up to date with `main`.
+- Protection applies to administrators and requires a PR, linear history, and
+  resolved conversations. The solo-maintainer policy requires zero approving
+  reviews; it does not bypass the required checks. Force pushes and branch
+  deletion are disabled on `main`.
 - Keep PRs focused — one logical change per PR is easier to review and
   easier to revert if something's wrong.
 - Update `CHANGELOG.md` under an `[Unreleased]` heading for user-visible
   changes (new patterns, new handlers, behavior changes). Skip it for
   pure internal refactors.
 - Squash-merge is the norm for this repository.
+
+## Publishing a Release
+
+1. Make package and module versions agree, date the changelog entry, and review
+   installation/help/API examples and license metadata.
+2. Build wheel and source archives with recorded tool versions. Verify their
+   contents, included license, clean installation, and a synthetic workflow.
+3. Merge the reviewed PR after all 14 checks pass. Verify the merge tree matches
+   the source used for the artifacts.
+4. Create an annotated version tag at that exact merge commit. Do not move an
+   existing tag or infer its target from a later `main`.
+5. Publish wheel, source archive, and `SHA256SUMS.txt` with bounded release notes.
+   Download the published assets and verify hashes, installation, and version.
+6. Update release-pinned quickstarts and the wiki after publication. Later
+   documentation changes do not justify moving the tag or replacing assets.
+
+The current workflow runs for PRs and pushes to `main`; tags and release events
+do not start it. Dependency-graph metadata updates are separate from this CI.
 
 ## Reporting Bugs
 

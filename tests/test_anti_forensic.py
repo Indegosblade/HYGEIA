@@ -576,8 +576,8 @@ class TestSecureDatabaseDeletion:
 
     def test_secure_overwrite_destroys_bytes(self):
         """#45: _secure_overwrite (used on the DB and its -wal/-shm/-journal
-        companions, which hold 50-95% of deleted-record PII) must replace the
-        whole extent with random bytes so the original PII is unrecoverable."""
+        companions) must replace the logical file's bytes before unlink.
+        This does not demonstrate physical erasure from the storage device."""
         d = _make_tmp()
         try:
             f = d / "companion.db-wal"

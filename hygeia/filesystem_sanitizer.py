@@ -1,9 +1,9 @@
 """
 HYGEIA Filesystem Sanitizer — forensic artifact removal.
 
-Targets data structures that survive file-level deletion:
-LevelDB stores, thumbnail caches, swap/hibernation files,
-Spotlight indexes, search databases, and credential stores.
+Applies rules to selected logical dataset artifacts, including LevelDB stores,
+thumbnail caches, swap/hibernation files, search indexes, and credential stores.
+This does not inspect or erase unallocated disk sectors or storage snapshots.
 """
 
 import logging

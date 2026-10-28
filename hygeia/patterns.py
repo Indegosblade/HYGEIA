@@ -1,26 +1,17 @@
 """
-HYGEIA Pattern Registry — single source of truth for all PII detection.
+Shared registry for supported regex and keyword-gated PII detectors.
 
-Loads patterns from rules/pii_patterns.json. Provides filtered pattern sets
-based on category selection (--only/--skip CLI flags). All consumers
-(verifier, text_sanitizer, sqlite_sanitizer) import from here.
+Loads rules/pii_patterns.json for text, SQLite, and verification consumers.
+CLI filters are --only and --skip-patterns; they do not select pipeline stages.
 
 Usage:
-    from hygeia.patterns import load_patterns, PatternRegistry
-
-    # Load all patterns
-    registry = load_patterns()
-
-    # Load only specific categories
+    from hygeia.patterns import load_patterns
     registry = load_patterns(only=["identity", "financial"])
+    registry = load_patterns(skip=["crypto", "credit_card"])
 
-    # Load everything except crypto
-    registry = load_patterns(skip=["crypto"])
-
-    # Access compiled patterns
-    for name, regex in registry.regex_patterns.items():
-        if regex.search(text):
-            print(f"Found {name}")
+Category-only selection retains global keyword-gated context detectors.
+A mixed only list limits those detectors to its individual names. Individual
+exclusions can remove them without changing category-exclusion behavior.
 """
 
 import json
@@ -90,18 +81,32 @@ def load_patterns(
     only: list[str] | None = None,
     skip: list[str] | None = None,
 ) -> PatternRegistry:
-    """Load and compile patterns from the JSON registry.
+    """
+    Compile the JSON registry using known category or individual pattern names.
 
-    Args:
-        only: List of category names OR individual pattern names to include.
-              Everything else is excluded.
-        skip: List of category names to exclude. Everything else is included.
-              Mutually exclusive with `only`.
+    only includes selected category patterns or individual detectors; skip excludes
+    selected categories and individual detectors. Global context detectors remain
+    under category-only selection/exclusion unless individually excluded. A mixed
+    only list limits global context detectors to its explicitly named individuals.
+    Sensitive-key/table rules have separate loading policy; filtering does not
+    guarantee unrelated keys or processing stages remain unchanged.
 
-    Returns:
-        PatternRegistry with compiled regex patterns filtered by selection.
+    Raises ValueError for unknown/empty names or simultaneous nonempty only/skip.
+    Omitted or empty lists use the default registry policy.
     """
     raw = _load_raw()
+    if only and skip:
+        raise ValueError("Use either --only or --skip-patterns, not both")
+    category_names = set(raw["categories"])
+    pattern_names = {
+        name for category in raw["categories"].values()
+        for name in category["patterns"]
+    } | {name for name in raw.get("context_patterns", {}) if not name.startswith("_")}
+    unknown = (set(only or []) | set(skip or [])) - category_names - pattern_names
+    if unknown:
+        names = ", ".join(repr(name) for name in sorted(unknown))
+        raise ValueError(f"Unknown pattern selector(s): {names}. Use --list-patterns for accepted names")
+    excluded_patterns = set(skip or []) & pattern_names
     registry = PatternRegistry()
 
     # Determine which individual patterns were explicitly requested
@@ -118,6 +123,8 @@ def load_patterns(
         if cat_name not in active_cats:
             continue
         for pat_name, pat_def in cat_data["patterns"].items():
+            if pat_name in excluded_patterns:
+                continue
             if individual_only and pat_name not in individual_only and cat_name not in (only or []):
                 continue
             flags = _compile_flags(pat_def.get("flags", []))
@@ -139,6 +146,8 @@ def load_patterns(
     # Compile context patterns (always loaded — they're self-gating via keywords)
     for pat_name, pat_def in raw.get("context_patterns", {}).items():
         if pat_name.startswith("_"):
+            continue
+        if pat_name in excluded_patterns:
             continue
         if individual_only and pat_name not in individual_only:
             continue

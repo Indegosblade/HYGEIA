@@ -1,19 +1,15 @@
 """
-HYGEIA Platform Handlers — Schema-aware surgical sanitization.
+Schema-aware SQLite handlers followed by a generic residual scan.
 
-Generic scanning catches PII in any SQLite database via regex + column-name
-heuristics.  Platform-specific handlers go further: they know the exact schema,
-which tables to nuke entirely, which columns to redact, and what's safe to keep.
+Known signatures select deletion/redaction rules; neither signatures nor regexes
+establish that arbitrary identifiers are absent. Inspect errors and verification.
 
-Usage
------
-    from hygeia.platform_handlers import detect_database_type, run_platform_handler
+Usage:
+    from pathlib import Path
+    from hygeia.platform_handlers import sanitize_with_platform_detection
+    action = sanitize_with_platform_detection(Path("clean/data.db"))
 
-    db_type = detect_database_type(db_path)
-    if db_type:
-        result = run_platform_handler(db_path, db_type)
-    else:
-        result = sanitize_database_generic(db_path)  # fallback
+The target must already be a disposable copy: this API mutates in place.
 """
 
 import logging
@@ -84,10 +80,10 @@ _DETECTION_SIGNATURES: list[tuple[frozenset, str]] = [
 
 def detect_database_type(db_path: Path) -> Optional[str]:
     """
-    Examine table names/schema to identify the database type.
+    Identify a known SQLite schema signature, or return None.
 
-    Returns one of the known type strings (see module docstring) or None
-    if the database is not recognised.
+    Signature names are defined in _DETECTION_SIGNATURES. A match is a schema
+    classification, not proof of the original application's identity.
     """
     if not db_path.exists() or not is_sqlite_database(db_path):
         return None

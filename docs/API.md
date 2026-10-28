@@ -48,3 +48,11 @@ Inspect action errors, verification, and the report's `identifiers_covered`,
 `text_sanitizer.configure()` and `verifier.configure()` change module-level
 process state. Avoid concurrent scopes in one process. Direct callers can provide
 `sanitize_database_generic(..., registry=...)` an explicit pattern registry.
+
+`hygeia.patterns.load_patterns(only=..., skip=...)` accepts known category or
+individual pattern names. Unknown/empty selectors and simultaneous nonempty
+`only`/`skip` raise `ValueError` in 3.15.3. Individual exclusions apply to both
+ordinary and keyword-gated patterns. Category-only selection retains global
+context detectors. A mixed `only=["financial", "date_of_birth"]` retains the
+financial category but loads only the explicitly named global context detector;
+see [pattern scope](CLI.md#pattern-scope) before narrowing a run.

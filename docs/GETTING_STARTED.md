@@ -1,8 +1,10 @@
 # Getting started
 
-HYGEIA 3.15.2 requires Python 3.10+. Follow the [installation steps](../README.md#install)
+HYGEIA requires Python 3.10+. Follow the [published-release installation steps](../README.md#install)
 in a virtual environment. Install [ExifTool](https://exiftool.org/) for image
 metadata processing; HYGEIA checks `PATH` and selected common installation paths.
+This guide follows current source. For a pinned package, use its tagged guide;
+selector validation and individual exclusions described here require 3.15.3.
 
 ## Prepare and process
 

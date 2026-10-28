@@ -1,11 +1,10 @@
 """
-HYGEIA Verifier -- post-sanitization PII verification.
+Post-processing checks for text, SQLite content/freelists, and image tags.
 
-Three independent checks: regex PII scan across text files,
-SQLite freelist inspection for recoverable records, and EXIF
-tag verification for residual image metadata.
-
-Patterns loaded from the central registry (rules/pii_patterns.json).
+These are separate passes, not independent proofs: text/SQLite detection shares
+the central pattern policy and SQLite row inventory with sanitization. Coverage
+is bounded by supported content, suppressions, and available tools. Review scope,
+performed, incomplete, and findings together.
 """
 
 import re
@@ -24,7 +23,7 @@ log = logging.getLogger("hygeia.verifier")
 
 _registry: PatternRegistry | None = None
 
-# Records whether the verifier was narrowed via --only/--skip. A narrowed
+# Records whether verification was narrowed via --only/--skip-patterns. A narrowed
 # verify can only see the selected categories, so it can NEVER certify a full
 # clean — verify_sanitization surfaces this as result.scope and the CLI must
 # print it so a scoped run is never mistaken for an unqualified PASSED (#43).
@@ -83,8 +82,8 @@ class VerificationResult:
     # forensic sanitizer must FAIL CLOSED: an un-run check is not a clean
     # check, so any incomplete entry blocks `passed`.
     incomplete: list = field(default_factory=list)
-    # When set, verification was narrowed to these pattern categories via
-    # --only/--skip and therefore did NOT check for PII outside them (#43).
+    # Human-readable requested selector label, not a stable category-list API.
+    # Non-None means verification was narrowed via --only/--skip-patterns.
     scope: str | None = None
     files_scanned: int = 0
     databases_inspected: int = 0
@@ -601,11 +600,13 @@ def verify_sanitization(dump_path: Path) -> VerificationResult:
     """
     result = VerificationResult()
 
-    # A narrowed verify (--only/--skip) cannot see PII outside the selected
+    # A narrowed verify (--only/--skip-patterns) cannot see PII outside the selected
     # categories, so record the scope; the CLI must never present it as a full
     # clean (#43).
-    if _scope_only or _scope_skip:
-        result.scope = ", ".join(sorted(_get_registry().active_categories)) or "(none)"
+    if _scope_only:
+        result.scope = "only=" + ", ".join(_scope_only)
+    elif _scope_skip:
+        result.scope = "skip=" + ", ".join(_scope_skip)
 
     log.info(f"Starting verification of {dump_path}")
 

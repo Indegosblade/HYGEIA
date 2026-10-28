@@ -1,10 +1,10 @@
 """
 HYGEIA Forensic Cleaner -- anti-forensic hardening module.
 
-Removes artifacts that survive standard file deletion and can be
-recovered by forensic tools: LevelDB stores, thumbnail/browser caches,
-swap/temp files, file-system timestamps, macOS quarantine xattrs, and
-crash reporter data.
+Removes selected logical LevelDB stores, thumbnail/browser caches, swap/temp
+files, macOS quarantine xattrs, and crash data, and normalizes eligible
+filesystem timestamps. These operations do not establish physical erasure from
+snapshots, backups, remapped storage, or unallocated sectors.
 
 clean_clipboard_history() also lives in this module but is deliberately NOT
 part of the automatic forensic_clean_all() pipeline (see finding #32) -- it

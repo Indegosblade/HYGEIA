@@ -1,5 +1,5 @@
 {
-  "_comment": "HYGEIA PII pattern registry. Single source of truth. Categories are selectable via --only/--skip CLI flags.",
+  "_comment": "HYGEIA PII pattern registry. Select known categories or individual names with --only or --skip-patterns; the options are mutually exclusive and do not select pipeline stages.",
   "categories": {
     "identity": {
       "description": "Personal identity patterns — emails, phones, government IDs",

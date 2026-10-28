@@ -1,9 +1,9 @@
 """
-HYGEIA Manifest Generator -- JSON audit trail for sanitization runs.
+HYGEIA JSON audit records for sanitization runs.
 
-Produces compliance-ready manifests documenting every action taken,
-files removed/preserved/sanitized, and verification results.
-Aligned with NIST SP 800-88, HIPAA Safe Harbor, and GDPR.
+Records actions, counts, configured scope, and verification results. This is
+implementation evidence, not NIST alignment or a legal compliance certificate.
+Paths can reveal sensitive information; keep manifests private.
 """
 
 import json

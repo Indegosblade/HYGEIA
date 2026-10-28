@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-HYGEIA CLI — Forensic-Grade PII Sanitization
+HYGEIA CLI -- copy, process supported content, verify, and record actions.
 
-Generic-first pipeline. Platform-specific rules (iOS, Chrome, Firefox,
-Android, Windows, macOS) activate automatically based on detected content.
+Schema-specific handlers and generic scanning operate within the configured
+policy. A passing result does not establish arbitrary personal-data absence.
 """
 
 import argparse
@@ -191,31 +191,32 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
 
 def main():
     parser = argparse.ArgumentParser(
-        description="HYGEIA — Forensic-Grade PII Sanitization",
+        description="HYGEIA — filesystem dataset sanitization and bounded verification",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Example: hygeia --input ./data --output ./clean"
     )
     parser.add_argument("--input", "-i", help="Source data directory (required for processing)")
     parser.add_argument("--output", "-o", help="Destination for sanitized copy (required for processing)")
-    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview actions without executing")
+    parser.add_argument("--dry-run", "-n", action="store_true", help="Preview actions without creating or verifying sanitized output")
     parser.add_argument("--compliance", choices=["hipaa", "gdpr", "ccpa", "all"],
-                        help="Compliance mode: hipaa, gdpr, ccpa, or all")
+                        help="Additional rule profile and coverage report; not legal certification")
     parser.add_argument("--normalize-timestamps", action="store_true",
-                        help="Set all file timestamps to epoch (anti-forensic)")
-    parser.add_argument("--skip-verify", action="store_true", help="Skip post-sanitization verification")
-    parser.add_argument("--skip-exif", action="store_true", help="Skip EXIF metadata stripping")
-    parser.add_argument("--skip-forensic", action="store_true", help="Skip anti-forensic hardening (LevelDB, caches, swap, timestamps)")
+                        help="Request epoch timestamps for eligible files/directories; external timeline evidence remains")
+    parser.add_argument("--skip-verify", action="store_true", help="Skip verification; output remains unverified even with exit zero")
+    parser.add_argument("--skip-exif", action="store_true", help="Skip image/PDF/Office metadata stripping; image verification remains active")
+    parser.add_argument("--skip-forensic", action="store_true", help="Skip the additional artifact-cleaner stage; earlier filesystem cleanup remains active")
     parser.add_argument("--only", type=str, default=None,
                         help="Limit text sanitization and verification patterns (comma-separated); "
                              "database and filesystem stages remain active. "
                              "Categories: identity, location, financial, credentials, crypto, healthcare, vehicle. "
-                             "Example: --only exif  or  --only vin,credit_card  or  --only financial,credentials")
+                             "Example: --only vin,credit_card or --only financial,credentials. "
+                             "Cannot combine with --skip-patterns; unknown names are errors.")
     parser.add_argument("--skip-patterns", type=str, default=None,
-                        help="Skip specific pattern categories (comma-separated). "
-                             "Example: --skip-patterns crypto,vehicle")
+                        help="Exclude known pattern names/categories (comma-separated). "
+                             "Example: --skip-patterns crypto,credit_card. Cannot combine with --only.")
     parser.add_argument("--list-patterns", action="store_true",
                         help="List all available pattern categories and exit")
-    parser.add_argument("--manifest", "-m", help="Custom path for audit manifest")
+    parser.add_argument("--manifest", "-m", help="Private audit JSON path; defaults to deletion_manifest.json beside output")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     parser.add_argument(
         "--workers", "-w", type=int, default=1,
@@ -257,13 +258,16 @@ def main():
     start_time = time.time()
 
     # Configure pattern filtering (--only / --skip-patterns)
-    pattern_only = [s.strip() for s in args.only.split(",")] if args.only else None
-    pattern_skip = [s.strip() for s in args.skip_patterns.split(",")] if args.skip_patterns else None
+    pattern_only = [s.strip() for s in args.only.split(",")] if args.only is not None else None
+    pattern_skip = [s.strip() for s in args.skip_patterns.split(",")] if args.skip_patterns is not None else None
 
     if pattern_only or pattern_skip:
         from . import text_sanitizer, verifier
-        text_sanitizer.configure(only=pattern_only, skip=pattern_skip)
-        verifier.configure(only=pattern_only, skip=pattern_skip)
+        try:
+            text_sanitizer.configure(only=pattern_only, skip=pattern_skip)
+            verifier.configure(only=pattern_only, skip=pattern_skip)
+        except ValueError as error:
+            parser.error(str(error))
 
     # Warn early if exiftool is missing so the user sees it before the pipeline runs
     if not args.skip_exif and find_exiftool() is None:
@@ -284,7 +288,7 @@ def main():
     # Resolve workers: 0 = auto-detect, else use as-is (clamped to >=1 inside helpers)
     workers = _resolve_workers(args.workers)
 
-    print("=== HYGEIA Forensic-Grade PII Sanitization ===")
+    print("=== HYGEIA dataset sanitization ===")
     print(f"Input:  {input_path}")
     print(f"Output: {output_path}")
     print(f"Mode:   {'DRY RUN' if args.dry_run else 'LIVE'}")

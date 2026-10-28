@@ -7,7 +7,7 @@ It does not prove that all personal data is absent.
 |---|---|
 | `performed` | Verification ran; false for dry runs and `--skip-verify` |
 | `passed` | No findings or recorded incomplete checks in the configured scope |
-| `scope` | Selected pattern categories when narrowed; null otherwise |
+| `scope` | Human-readable requested only/skip selectors when narrowed; null otherwise |
 | `incomplete` | Checks that could not finish, including failed actions added by the CLI |
 | Finding counts | Pattern matches, SQLite freelist findings, image metadata failures |
 
@@ -18,6 +18,8 @@ text files above the default 10 MiB scan cap can yield incomplete results.
 
 Keep actions and verification together: a fresh standalone verification cannot
 reconstruct every earlier failed mutation.
+Scope labels are intended for review, not parsing as a stable category-list API.
+Use null/non-null to distinguish full configured checks from a narrowed run.
 
 ## Detection boundaries
 
@@ -47,4 +49,4 @@ certification. Inspect `identifiers_covered`, `gaps`, and `limitations` returned
 - Metadata stripping leaves identifying image content, including faces, intact.
 
 Keep manifests private and review output against the intended sharing requirements.
-Historical release notes describe prior behavior; this document describes 3.15.2.
+Historical release notes describe prior behavior; this document describes 3.15.3.
