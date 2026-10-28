@@ -477,8 +477,8 @@ def run_platform_handler(db_path: Path, db_type: str) -> dict:
 
 def sanitize_with_platform_detection(
     db_path: Path,
-    extra_columns: set = None,
-    extra_tables: set = None,
+    extra_columns: set[str] | None = None,
+    extra_tables: set[str] | None = None,
 ) -> dict:
     """
     Auto-detect platform type and run the appropriate handler.

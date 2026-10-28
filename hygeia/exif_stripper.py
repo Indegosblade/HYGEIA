@@ -11,6 +11,7 @@ import subprocess
 import shutil
 import logging
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("hygeia.exif")
 
@@ -60,7 +61,7 @@ def strip_exif_directory(path: Path) -> dict:
     ``"skipped": True`` and ``"reason": "exiftool not installed"`` and no
     metadata is stripped.
     """
-    result = {
+    result: dict[str, Any] = {
         "action": "exif_strip",
         "path": str(path),
         "files_stripped": 0,
@@ -126,7 +127,7 @@ def verify_exif_stripped(path: Path) -> list[Path]:
     Checks for: GPS tags, Make, Model, SerialNumber, LensSerialNumber,
     ImageUniqueID, OwnerName, CameraOwnerName, Copyright.
     """
-    files_with_exif = []
+    files_with_exif: list[Path] = []
 
     exiftool_path = find_exiftool()
     if exiftool_path is None:

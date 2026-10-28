@@ -44,8 +44,11 @@ bandit -r hygeia/ -c pyproject.toml
 hygeia --help
 ```
 
-CI runs the test suite across Python 3.10–3.13 on Ubuntu, Windows, and
-macOS. If you're changing filesystem or path-handling code, be aware that
+The Linux quality gate runs lint, type checking, and Bandit once before the
+Python 3.10–3.13 test matrix starts on Ubuntu, Windows, and macOS. Development
+tools are pinned in `pyproject.toml`; validate dependency updates locally before
+publishing a branch. Superseded runs are canceled, and a failed matrix job
+stops its siblings. If you're changing filesystem or path-handling code, be aware that
 behavior can differ across platforms (case sensitivity, symlink semantics,
 `os.utime` support) — this has caused real CI failures before.
 
@@ -87,9 +90,12 @@ following the same naming convention for a new module.
 
 ## Pull Requests
 
-- `main` is protected: PRs require the `Test (Python 3.12, ubuntu-latest)`,
-  `Type Check (mypy)`, and `Security Scan (bandit)` checks to pass, and the
-  branch must be up to date with `main` before merge.
+- Required checks must match the workflow's `Quality (lint, types, security)`
+  and `Test (Python 3.12, ubuntu-latest)` job names, and the branch must be up
+  to date with `main` before merge. When adopting the consolidated quality
+  gate, maintainers must update any older required `Type Check (mypy)` and
+  `Security Scan (bandit)` contexts in repository protection; do not bypass
+  protection to work around obsolete check names.
 - Keep PRs focused — one logical change per PR is easier to review and
   easier to revert if something's wrong.
 - Update `CHANGELOG.md` under an `[Unreleased]` heading for user-visible

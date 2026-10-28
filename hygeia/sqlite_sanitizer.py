@@ -12,6 +12,7 @@ import sqlite3
 import time
 import logging
 from pathlib import Path
+from typing import Any
 
 from .utils import sha256 as _sha256, quote_identifier, is_safe_regular_file
 
@@ -109,7 +110,8 @@ def _fts_content_option(sql):
                   and lexemes[i + 2] == "("), None)
     if start is None:
         return None
-    argument, depth = [], 1
+    argument: list[str] = []
+    depth = 1
     for piece in lexemes[start:]:
         if piece == "(":
             depth += 1
@@ -521,7 +523,7 @@ def delete_database(db_path: Path, root: Path | None = None) -> dict:
     symlink is never followed, so this cannot clobber a host file the dump
     points at.
     """
-    result = {"action": "delete_database", "path": str(db_path),
+    result: dict[str, Any] = {"action": "delete_database", "path": str(db_path),
               "wal_files_removed": [], "secure_overwrite": []}
 
     if is_sqlite_database(db_path):
@@ -559,7 +561,7 @@ def sanitize_database(db_path: Path, sql_commands: list[str]) -> dict:
     4. VACUUM to rebuild and eliminate free pages
     5. Remove WAL/SHM files
     """
-    result = {
+    result: dict[str, Any] = {
         "action": "sanitize_database",
         "path": str(db_path),
         "commands_executed": 0,
@@ -627,7 +629,8 @@ def find_all_databases(dump_path: Path) -> list[Path]:
     return databases
 
 
-def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_tables: set = None,
+def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = None,
+                              extra_tables: set[str] | None = None,
                               registry=None) -> dict:
     """
     Platform-agnostic SQLite sanitizer. Scans every TEXT column in every
@@ -657,7 +660,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
     if extra_tables:
         PII_TABLES = PII_TABLES | extra_tables
 
-    result = {
+    result: dict[str, Any] = {
         "action": "generic_sanitize",
         "path": str(db_path),
         "tables_scanned": 0,

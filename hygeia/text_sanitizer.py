@@ -12,6 +12,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
 from .patterns import load_patterns, get_default_registry, PatternRegistry
 from .utils import sha256 as _sha256
@@ -172,7 +173,7 @@ def _redact_json_recursive(obj, redacted_keys: list):
 
 
 def sanitize_json(filepath: Path) -> dict:
-    result = {
+    result: dict[str, Any] = {
         "action": "json_sanitize",
         "path": str(filepath),
         "keys_redacted": 0,
@@ -181,7 +182,7 @@ def sanitize_json(filepath: Path) -> dict:
         result["hash_before"] = _sha256(filepath)
         content = filepath.read_text(encoding="utf-8", errors="ignore")
         data = json.loads(content)
-        redacted_keys = []
+        redacted_keys: list[str] = []
         _redact_json_recursive(data, redacted_keys)
         if redacted_keys:
             filepath.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -194,7 +195,7 @@ def sanitize_json(filepath: Path) -> dict:
 
 
 def sanitize_log_file(filepath: Path) -> dict:
-    result = {
+    result: dict[str, Any] = {
         "action": "log_sanitize",
         "path": str(filepath),
         "lines_redacted": 0,
@@ -223,7 +224,7 @@ def sanitize_log_file(filepath: Path) -> dict:
 
 
 def sanitize_csv(filepath: Path) -> dict:
-    result = {
+    result: dict[str, Any] = {
         "action": "csv_sanitize",
         "path": str(filepath),
         "cells_redacted": 0,
@@ -286,7 +287,7 @@ def delete_shell_history(filepath: Path) -> dict:
 
 def find_sanitizable_text_files(dump_path: Path) -> dict[str, list[Path]]:
     """Discover text files to sanitize, grouped by type."""
-    found = {"json": [], "log": [], "csv": [], "history": []}
+    found: dict[str, list[Path]] = {"json": [], "log": [], "csv": [], "history": []}
     for f in dump_path.rglob("*"):
         if not f.is_file():
             continue

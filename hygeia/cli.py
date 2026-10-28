@@ -60,7 +60,7 @@ def _resolve_workers(workers: int) -> int:
 
 def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry_run: bool,
                        workers: int = 1) -> list[dict]:
-    actions = []
+    actions: list[dict] = []
 
     is_ios = (scan_result.jailbreak and scan_result.jailbreak.detected) or \
              any(c.reason.startswith("system:") for c in scan_result.classifications)
@@ -117,7 +117,7 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
             actions.append({"action": "generic_sanitize", "path": str(db.relative_to(work_path)), "dry_run": True})
     elif workers > 1:
         # Parallel database sanitization
-        db_results = [None] * total_dbs
+        db_results: list[dict] = [{} for _ in range(total_dbs)]
         futures_map = {}
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for idx, db in enumerate(databases):
@@ -465,7 +465,7 @@ def main():
 
     if args.dry_run:
         print("DRY RUN complete. No files were modified.")
-        action_counts = {}
+        action_counts: dict[str, int] = {}
         for a in all_actions:
             t = a.get("action", "unknown")
             action_counts[t] = action_counts.get(t, 0) + 1

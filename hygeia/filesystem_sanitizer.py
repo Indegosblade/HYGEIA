@@ -124,7 +124,7 @@ FORENSIC_PATTERNS = [
 
 
 def sanitize_filesystem(dump_path: Path, dry_run: bool = False, normalize_timestamps: bool = False) -> list[dict]:
-    actions = []
+    actions: list[dict] = []
 
     # Delete forensic directories
     for forensic_dir in FORENSIC_DIRECTORIES:
