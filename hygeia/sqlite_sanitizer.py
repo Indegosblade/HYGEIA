@@ -11,7 +11,9 @@ import re
 import sqlite3
 import time
 import logging
+from contextlib import closing
 from pathlib import Path
+from typing import Any
 
 from .utils import sha256 as _sha256, quote_identifier, is_safe_regular_file
 
@@ -19,6 +21,51 @@ log = logging.getLogger("hygeia.sqlite")
 
 SQLITE_EXTENSIONS = {".sqlite", ".db", ".sqlitedb", ".storedata", ".plsql", ".PLSQL"}
 WAL_SUFFIXES = ["-wal", "-shm", "-journal"]
+SCAN_BATCH_SIZE = 500
+MAX_RECORDED_ERRORS = 100
+
+
+def _record_sanitize_error(result, operation, table, column=None):
+    """Keep bounded, value-free evidence of incomplete redaction (#39).
+
+    SQLite exception strings can contain trigger-supplied PII. Record the
+    failing operation and location, never the exception or original cell.
+    ``integrity_post`` describes database structure only, not sanitization.
+    """
+    result["errors_count"] += 1
+    if len(result["errors"]) < MAX_RECORDED_ERRORS:
+        item = {"operation": operation, "table": table}
+        if column is not None:
+            item["column"] = column
+        result["errors"].append(item)
+    result.setdefault("error", "SQLite sanitization incomplete; see errors_count and errors")
+
+
+def _column_rows(conn, table, column, rowid_name, result, exclude_redacted=False):
+    """Stream a column using a separate read cursor so UPDATE does not reset it."""
+    qt, qc = quote_identifier(table), quote_identifier(column)
+    reader = conn.cursor()
+    extra = f" AND {qc} NOT LIKE '%[REDACTED%'" if exclude_redacted else ""
+    try:
+        # rowid_name is one of SQLite's three built-in aliases, never input SQL.
+        reader.execute(f"SELECT {rowid_name}, {qc} FROM {qt} WHERE {qc} IS NOT NULL{extra}")
+        while True:
+            batch = reader.fetchmany(SCAN_BATCH_SIZE)
+            if not batch:
+                break
+            yield from batch
+    except sqlite3.Error:
+        _record_sanitize_error(result, "read_column", table, column)
+    finally:
+        reader.close()
+
+
+def _redaction_retained(conn, qtable, qcol, rowid_name, rowid, value):
+    """Detect AFTER triggers that restore a cell or delete/move the target row."""
+    row = conn.execute(
+        f"SELECT {qcol} FROM {qtable} WHERE {rowid_name} = ?", (rowid,)
+    ).fetchone()
+    return row is not None and row[0] == value
 
 # FTS3/4 (_content/_segments/_segdir) AND FTS5 (_data/_idx/_docsize/_config,
 # plus _content for stored-content tables) shadow-table suffixes. Tokenized PII
@@ -41,8 +88,63 @@ _FTS_VIRTUAL_RE = re.compile(
 # option. Its *absence* means FTS is managing its own internal content shadow
 # table (``_content``), which a rebuild can always regenerate the index from.
 _FTS_CONTENT_OPTION_RE = re.compile(
-    r"""\bcontent\s*=\s*(?:'([^']*)'|"([^"]*)")""", re.IGNORECASE
+    r"""^content\s*=\s*(?:'((?:[^']|'')*)'|"((?:[^"]|"")*)"|([^\s,)]+))$""",
+    re.IGNORECASE,
 )
+_SQL_TOKEN_RE = re.compile(
+    r"""--[^\n]*|/\*.*?\*/|'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|[A-Za-z_][A-Za-z_0-9]*|\s+|.""",
+    re.DOTALL,
+)
+
+
+def _fts_content_option(sql):
+    """Read a top-level FTS content option, excluding quoted names/comments.
+
+    ``content='records'`` inside a column name or tokenizer string is data,
+    not a module option. SQLite stores the original quoting in sqlite_master.
+    """
+    lexemes = [piece for piece in _SQL_TOKEN_RE.findall(sql)
+               if not piece.isspace() and not piece.startswith(("--", "/*"))]
+    start = next((i + 3 for i in range(len(lexemes) - 2)
+                  if lexemes[i].upper() == "USING"
+                  and lexemes[i + 1].lower() in {"fts3", "fts4", "fts5"}
+                  and lexemes[i + 2] == "("), None)
+    if start is None:
+        return None
+    argument: list[str] = []
+    depth = 1
+    for piece in lexemes[start:]:
+        if piece == "(":
+            depth += 1
+        elif piece == ")":
+            depth -= 1
+        if (piece == "," and depth == 1) or depth == 0:
+            match = _FTS_CONTENT_OPTION_RE.fullmatch("".join(argument))
+            if match:
+                value = next(value for value in match.groups() if value is not None)
+                if match.group(1) is not None:
+                    value = value.replace("''", "'")
+                elif match.group(2) is not None:
+                    value = value.replace('""', '"')
+                return value
+            argument = []
+            if depth == 0:
+                break
+        else:
+            argument.append(piece)
+    return None
+
+
+def _fts_external_sources(master_rows, fts_bases):
+    """Find explicit external-content sources, including unquoted options."""
+    sources = {}
+    for name, sql in master_rows:
+        if name not in fts_bases or not sql:
+            continue
+        value = _fts_content_option(sql)
+        if value:
+            sources[name] = value
+    return sources
 
 
 def _fts_base_tables(master_rows) -> set:
@@ -96,7 +198,7 @@ def _fts_uncleanable_bases(master_rows, fts_bases) -> set:
     sql_by_name = {row[0]: row[1] for row in master_rows}
     for base in fts_bases:
         sql = sql_by_name.get(base)
-        if sql and _FTS_CONTENT_OPTION_RE.search(sql):
+        if sql and _fts_content_option(sql) is not None:
             uncleanable.add(base)
     return uncleanable
 
@@ -139,7 +241,7 @@ def _redact_cell(value, pattern, pii_name: str):
 
 
 def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result,
-                              uncleanable_bases=frozenset()) -> bool:
+                              uncleanable_bases=frozenset(), external_bases=frozenset()) -> bool:
     """Rebuild or safely clear FTS3/4/5 shadow index tables. Return True iff all
     FTS indexes were cleaned without corrupting the database.
 
@@ -166,6 +268,23 @@ def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result,
         if base not in existing_tables:
             continue
         qbase = quote_identifier(base)
+        if base in external_bases:
+            # The authoritative ordinary table has already passed through the
+            # full sanitizer loop. Rebuild discards the old postings; rank=1
+            # then verifies the index against that content, not just itself.
+            # https://www.sqlite.org/fts5.html#the_integrity_check_command
+            try:
+                conn.execute("SAVEPOINT hygeia_external_fts")
+                cursor.execute(f"INSERT INTO {qbase}({qbase}) VALUES('rebuild')")
+                cursor.execute(f"INSERT INTO {qbase}({qbase}, rank) VALUES('integrity-check', 1)")
+                conn.execute("RELEASE hygeia_external_fts")
+                result.setdefault("fts_rebuilt", []).append(base)
+            except sqlite3.Error:
+                conn.execute("ROLLBACK TO hygeia_external_fts")
+                conn.execute("RELEASE hygeia_external_fts")
+                all_clean = False
+                result.setdefault("fts_cleanup_incomplete", []).append(base)
+            continue
         if base not in uncleanable_bases:
             try:
                 cursor.execute(f"INSERT INTO {qbase}({qbase}) VALUES('rebuild')")
@@ -307,31 +426,24 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path) -> bool:
     so callers MUST treat a False return as "not sanitized" and surface it — a
     silent success here is a false clean (finding #15).
     """
-    conn.commit()
-
-    # Flush WAL into the main database file so VACUUM sees a clean state.
     try:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.OperationalError:
-        pass  # Not in WAL mode — ignore
-
-    # Close the connection (and with it every cursor) before VACUUM.
-    conn.close()
+        conn.commit()
+        # Flush WAL into the main database file so VACUUM sees a clean state.
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.OperationalError:
+            pass  # Not in WAL mode — ignore
+    finally:
+        # This function consumes the connection, including on commit failure.
+        conn.close()
 
     def _do_vacuum(path: Path) -> bool:
-        vconn = None
         try:
-            vconn = sqlite3.connect(str(path))
-            vconn.execute("VACUUM")
-            vconn.close()
+            with closing(sqlite3.connect(str(path))) as vconn:
+                vconn.execute("VACUUM")
             return True
         except sqlite3.OperationalError as e:
             log.warning(f"VACUUM attempt failed on {path}: {e}")
-            if vconn:
-                try:
-                    vconn.close()
-                except Exception:
-                    pass
             return False
 
     def _do_vacuum_journal_delete(path: Path) -> bool:
@@ -341,21 +453,14 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path) -> bool:
         forces a full WAL checkpoint and removes the WAL file, which clears the
         OS-level lock that was blocking VACUUM.
         """
-        vconn = None
         try:
-            vconn = sqlite3.connect(str(path))
-            vconn.execute("PRAGMA journal_mode=DELETE")
-            vconn.commit()
-            vconn.execute("VACUUM")
-            vconn.close()
+            with closing(sqlite3.connect(str(path))) as vconn:
+                vconn.execute("PRAGMA journal_mode=DELETE")
+                vconn.commit()
+                vconn.execute("VACUUM")
             return True
         except sqlite3.OperationalError as e:
             log.warning(f"VACUUM (journal_mode=DELETE) failed on {path}: {e}")
-            if vconn:
-                try:
-                    vconn.close()
-                except Exception:
-                    pass
             return False
 
     strategies = [
@@ -405,14 +510,13 @@ def delete_database(db_path: Path, root: Path | None = None) -> dict:
     symlink is never followed, so this cannot clobber a host file the dump
     points at.
     """
-    result = {"action": "delete_database", "path": str(db_path),
+    result: dict[str, Any] = {"action": "delete_database", "path": str(db_path),
               "wal_files_removed": [], "secure_overwrite": []}
 
     if is_sqlite_database(db_path):
         try:
-            conn = sqlite3.connect(str(db_path))
-            checkpoint_and_prepare(conn)
-            conn.close()
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                checkpoint_and_prepare(conn)
         except sqlite3.Error as e:
             log.warning(f"Could not checkpoint {db_path} before deletion: {e}")
 
@@ -443,17 +547,20 @@ def sanitize_database(db_path: Path, sql_commands: list[str]) -> dict:
     4. VACUUM to rebuild and eliminate free pages
     5. Remove WAL/SHM files
     """
-    result = {
+    result: dict[str, Any] = {
         "action": "sanitize_database",
         "path": str(db_path),
         "commands_executed": 0,
         "rows_affected": 0,
+        "errors_count": 0,
+        "errors": [],
     }
 
     if not db_path.exists():
         result["error"] = "Database not found"
         return result
 
+    conn = None
     try:
         conn = sqlite3.connect(str(db_path))
         checkpoint_and_prepare(conn)
@@ -464,8 +571,8 @@ def sanitize_database(db_path: Path, sql_commands: list[str]) -> dict:
                 cursor.execute(sql)
                 result["rows_affected"] += cursor.rowcount if cursor.rowcount > 0 else 0
                 result["commands_executed"] += 1
-            except sqlite3.Error as e:
-                log.warning(f"SQL error in {db_path.name}: {e} (command: {sql[:80]})")
+            except sqlite3.Error:
+                _record_sanitize_error(result, "execute_command", "(explicit SQL)")
 
         vacuum_ok = vacuum_and_cleanup(conn, db_path)
         if not vacuum_ok:
@@ -479,6 +586,9 @@ def sanitize_database(db_path: Path, sql_commands: list[str]) -> dict:
     except sqlite3.Error as e:
         result["error"] = str(e)
         log.error(f"Failed to sanitize {db_path}: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
 
     return result
 
@@ -505,7 +615,8 @@ def find_all_databases(dump_path: Path) -> list[Path]:
     return databases
 
 
-def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_tables: set = None,
+def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = None,
+                              extra_tables: set[str] | None = None,
                               registry=None) -> dict:
     """
     Platform-agnostic SQLite sanitizer. Scans every TEXT column in every
@@ -535,13 +646,15 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
     if extra_tables:
         PII_TABLES = PII_TABLES | extra_tables
 
-    result = {
+    result: dict[str, Any] = {
         "action": "generic_sanitize",
         "path": str(db_path),
         "tables_scanned": 0,
         "columns_scanned": 0,
         "rows_redacted": 0,
         "pii_types_found": [],
+        "errors_count": 0,
+        "errors": [],
     }
 
     if not db_path.exists() or not is_sqlite_database(db_path):
@@ -552,9 +665,8 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
 
     # Pre-sanitization integrity check
     try:
-        pre_conn = sqlite3.connect(str(db_path))
-        integrity = pre_conn.execute("PRAGMA integrity_check").fetchone()
-        pre_conn.close()
+        with closing(sqlite3.connect(str(db_path))) as pre_conn:
+            integrity = pre_conn.execute("PRAGMA integrity_check").fetchone()
         if integrity[0] != "ok":
             result["error"] = f"Database corruption detected pre-sanitization: {integrity[0]}"
             result["integrity_pre"] = False
@@ -565,6 +677,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         result["error"] = f"Cannot open database for integrity check: {e}"
         return result
 
+    conn = None
     try:
         conn = sqlite3.connect(str(db_path))
         checkpoint_and_prepare(conn)
@@ -578,8 +691,23 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         table_set = set(tables)
         fts_bases = _fts_base_tables(master_rows)
         fts_uncleanable = _fts_uncleanable_bases(master_rows, fts_bases)
+        fts_sources = _fts_external_sources(master_rows, fts_bases)
         fts_shadow = {f"{b}{suf}" for b in fts_bases for suf in FTS_SHADOW_SUFFIXES
                       if f"{b}{suf}" in table_set}
+        ordinary_tables = {
+            name.lower() for name, sql in master_rows
+            if sql and not re.search(r"CREATE\s+VIRTUAL\s+TABLE", sql, re.IGNORECASE)
+            and name not in fts_shadow
+        }
+        sql_by_name = dict(master_rows)
+        external_fts5 = {
+            name for name, source in fts_sources.items()
+            if source.lower() in ordinary_tables
+            and re.search(r"\bUSING\s+fts5\s*\(", sql_by_name[name], re.IGNORECASE)
+            # Stored-content FTS5 has a _content shadow. An apparent content=
+            # inside a quoted column name must not make us skip its real data.
+            and f"{name}_content" not in table_set
+        }
 
         pii_found = set()
 
@@ -589,6 +717,14 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
             if table in fts_shadow:
                 continue
             result["tables_scanned"] += 1
+            if table in fts_sources:
+                # This virtual table exposes its source's cells. Updating it
+                # directly edits postings without updating the source and can
+                # corrupt trigger-maintained indexes. Sanitize the source and
+                # rebuild after all authoritative tables have been processed.
+                if table.lower() in PII_TABLES:
+                    _record_sanitize_error(result, "external_table_delete", table)
+                continue
             qtable = quote_identifier(table)
 
             # Nuke entire PII tables
@@ -601,13 +737,14 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
                         result["rows_redacted"] += count
                         pii_found.add(f"pii_table:{table}")
                 except sqlite3.Error:
-                    pass
+                    _record_sanitize_error(result, "delete_table", table)
                 continue
 
             try:
                 cursor.execute(f"PRAGMA table_info({qtable})")
                 columns = cursor.fetchall()
             except sqlite3.Error:
+                _record_sanitize_error(result, "read_schema", table)
                 continue
 
             # SQLite is dynamically typed: scan EVERY column, not only declared
@@ -615,6 +752,12 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
             # INTEGER / REAL columns; non-text scalar cells simply never match
             # inside _redact_cell, which also decodes BLOB bytes (finding #14).
             text_cols = [col[1] for col in columns]
+            declared = {col[1].lower() for col in columns}
+            rowid_name = next((name for name in ("_rowid_", "rowid", "oid")
+                               if name not in declared), None)
+            if rowid_name is None:
+                _record_sanitize_error(result, "row_addressing", table)
+                continue
 
             for col_name in text_cols:
                 result["columns_scanned"] += 1
@@ -624,50 +767,68 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
                 # Direct redact columns with sensitive names
                 if col_lower in SENSITIVE_COLUMNS:
                     try:
+                        expected = cursor.execute(
+                            f"SELECT count(*) FROM {qtable} "
+                            f"WHERE {qcol} IS NOT NULL AND {qcol} != ''"
+                        ).fetchone()[0]
                         cursor.execute(
                             f"UPDATE {qtable} SET {qcol} = '[REDACTED]' "
                             f"WHERE {qcol} IS NOT NULL AND {qcol} != ''"
                         )
                         affected = cursor.rowcount if cursor.rowcount > 0 else 0
+                        if affected != expected:
+                            raise sqlite3.IntegrityError("redaction update skipped rows")
+                        residual = cursor.execute(
+                            f"SELECT 1 FROM {qtable} WHERE {qcol} IS NOT NULL "
+                            f"AND {qcol} != '' AND {qcol} != '[REDACTED]' LIMIT 1"
+                        ).fetchone()
+                        if residual is not None:
+                            raise sqlite3.IntegrityError("redaction update not retained")
                         if affected:
                             result["rows_redacted"] += affected
                             pii_found.add(f"sensitive_column:{col_lower}")
                     except sqlite3.Error:
                         # UNIQUE/PK constraint — use per-row unique values
-                        try:
-                            rows = cursor.execute(
-                                f"SELECT rowid FROM {qtable} "
-                                f"WHERE {qcol} IS NOT NULL AND {qcol} != ''"
-                            ).fetchall()
-                            for i, (rowid,) in enumerate(rows):
+                        for i, (rowid, value) in enumerate(
+                            _column_rows(conn, table, col_name, rowid_name, result)
+                        ):
+                            if value == "":
+                                continue
+                            try:
                                 cursor.execute(
-                                    f"UPDATE {qtable} SET {qcol} = ? WHERE rowid = ?",
+                                    f"UPDATE {qtable} SET {qcol} = ? WHERE {rowid_name} = ?",
                                     (f"[REDACTED_{i}]", rowid),
                                 )
-                            if rows:
-                                result["rows_redacted"] += len(rows)
-                                pii_found.add(f"sensitive_column:{col_lower}")
-                        except sqlite3.Error:
-                            pass
+                                if cursor.rowcount != 1 or not _redaction_retained(
+                                    conn, qtable, qcol, rowid_name, rowid, f"[REDACTED_{i}]"
+                                ):
+                                    _record_sanitize_error(result, "redact_cell", table, col_name)
+                                    continue
+                            except sqlite3.Error:
+                                _record_sanitize_error(result, "redact_cell", table, col_name)
+                                continue
+                            result["rows_redacted"] += 1
+                            pii_found.add(f"sensitive_column:{col_lower}")
                     continue
 
                 # Regex scan other columns (incl. BLOB / mistyped) for PII
                 for pii_name, pattern in PII_PATTERNS.items():
-                    try:
-                        cursor.execute(f"SELECT rowid, {qcol} FROM {qtable} WHERE {qcol} IS NOT NULL")
-                        rows = cursor.fetchall()
-                    except sqlite3.Error:
-                        continue
-                    for rowid, value in rows:
+                    for rowid, value in _column_rows(conn, table, col_name, rowid_name, result):
                         new_value, matched = _redact_cell(value, pattern, pii_name)
                         if not matched:
                             continue
                         try:
                             cursor.execute(
-                                f"UPDATE {qtable} SET {qcol} = ? WHERE rowid = ?",
+                                f"UPDATE {qtable} SET {qcol} = ? WHERE {rowid_name} = ?",
                                 (new_value, rowid),
                             )
+                            if cursor.rowcount != 1 or not _redaction_retained(
+                                conn, qtable, qcol, rowid_name, rowid, new_value
+                            ):
+                                _record_sanitize_error(result, "redact_cell", table, col_name)
+                                continue
                         except sqlite3.Error:
+                            _record_sanitize_error(result, "redact_cell", table, col_name)
                             continue
                         result["rows_redacted"] += 1
                         pii_found.add(pii_name)
@@ -677,38 +838,44 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         for pass_num in range(2, 6):
             pass_redacted = 0
             for table in tables:
-                if table in fts_shadow or table.lower() in PII_TABLES:
+                if table in fts_shadow or table in fts_sources or table.lower() in PII_TABLES:
                     continue
                 qtable = quote_identifier(table)
                 try:
                     cursor.execute(f"PRAGMA table_info({qtable})")
                     columns = cursor.fetchall()
                 except sqlite3.Error:
+                    _record_sanitize_error(result, "read_schema", table)
                     continue
+                declared = {col[1].lower() for col in columns}
+                rowid_name = next((name for name in ("_rowid_", "rowid", "oid")
+                                   if name not in declared), None)
+                if rowid_name is None:
+                    continue  # recorded in the first pass
                 text_cols = [c[1] for c in columns if c[1].lower() not in SAFE_COLUMNS]
                 for col_name in text_cols:
                     if col_name.lower() in SENSITIVE_COLUMNS:
                         continue
                     qcol = quote_identifier(col_name)
                     for pii_name, pattern in PII_PATTERNS.items():
-                        try:
-                            cursor.execute(
-                                f"SELECT rowid, {qcol} FROM {qtable} "
-                                f"WHERE {qcol} IS NOT NULL AND {qcol} NOT LIKE '%[REDACTED%'"
-                            )
-                            rows = cursor.fetchall()
-                        except sqlite3.Error:
-                            continue
-                        for rowid, value in rows:
+                        for rowid, value in _column_rows(
+                            conn, table, col_name, rowid_name, result, exclude_redacted=True
+                        ):
                             new_value, matched = _redact_cell(value, pattern, pii_name)
                             if not matched:
                                 continue
                             try:
                                 cursor.execute(
-                                    f"UPDATE {qtable} SET {qcol} = ? WHERE rowid = ?",
+                                    f"UPDATE {qtable} SET {qcol} = ? WHERE {rowid_name} = ?",
                                     (new_value, rowid),
                                 )
+                                if cursor.rowcount != 1 or not _redaction_retained(
+                                    conn, qtable, qcol, rowid_name, rowid, new_value
+                                ):
+                                    _record_sanitize_error(result, "redact_cell", table, col_name)
+                                    continue
                             except sqlite3.Error:
+                                _record_sanitize_error(result, "redact_cell", table, col_name)
                                 continue
                             pass_redacted += 1
             if pass_redacted == 0:
@@ -725,7 +892,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
         # shortcut entirely — that decision is structural (from the DDL), not
         # dependent on whether rebuild happens to raise on this SQLite version.
         fts_ok = _clean_fts_shadow_tables(conn, cursor, fts_bases, table_set, result,
-                                           fts_uncleanable)
+                                           fts_uncleanable, external_fts5)
         if not fts_ok:
             result["error"] = (
                 "FTS index cleanup incomplete — tokenized PII may remain in the "
@@ -745,9 +912,8 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
 
         # Post-sanitization integrity check
         try:
-            post_conn = sqlite3.connect(str(db_path))
-            integrity = post_conn.execute("PRAGMA integrity_check").fetchone()
-            post_conn.close()
+            with closing(sqlite3.connect(str(db_path))) as post_conn:
+                integrity = post_conn.execute("PRAGMA integrity_check").fetchone()
             result["integrity_post"] = integrity[0] == "ok"
             if not result["integrity_post"]:
                 result.setdefault("error", f"Database corrupt post-sanitization: {integrity[0]}")
@@ -763,6 +929,9 @@ def sanitize_database_generic(db_path: Path, extra_columns: set = None, extra_ta
     except sqlite3.Error as e:
         result["error"] = str(e)
         log.error(f"Failed generic sanitize {db_path}: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
 
     return result
 

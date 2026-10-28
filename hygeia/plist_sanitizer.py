@@ -390,7 +390,7 @@ def _regex_scan_plist(obj, found_types: list, path: str = ""):
                 _regex_scan_plist(item, found_types, child_path)
 
 
-def _detect_plist_fmt(filepath: Path) -> object:
+def _detect_plist_fmt(filepath: Path) -> plistlib.PlistFormat:
     """Return plistlib.FMT_BINARY if the file starts with 'bplist', else FMT_XML."""
     try:
         with open(filepath, "rb") as f:

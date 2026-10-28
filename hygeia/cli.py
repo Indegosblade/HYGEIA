@@ -60,7 +60,7 @@ def _resolve_workers(workers: int) -> int:
 
 def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry_run: bool,
                        workers: int = 1) -> list[dict]:
-    actions = []
+    actions: list[dict] = []
 
     is_ios = (scan_result.jailbreak and scan_result.jailbreak.detected) or \
              any(c.reason.startswith("system:") for c in scan_result.classifications)
@@ -117,7 +117,7 @@ def sanitize_databases(work_path: Path, scan_result: ScanResult, compliance, dry
             actions.append({"action": "generic_sanitize", "path": str(db.relative_to(work_path)), "dry_run": True})
     elif workers > 1:
         # Parallel database sanitization
-        db_results = [None] * total_dbs
+        db_results: list[dict] = [{} for _ in range(total_dbs)]
         futures_map = {}
         with ThreadPoolExecutor(max_workers=workers) as executor:
             for idx, db in enumerate(databases):
@@ -379,6 +379,15 @@ def main():
     if not args.skip_verify and not args.dry_run:
         print("[6/7] Verifying sanitization...")
         verification = verify_sanitization(work_path)
+        for action in all_actions:
+            if action.get("error") or action.get("errors") or action.get("success") is False:
+                verification.incomplete.append({
+                    "check": "sanitization",
+                    "path": action.get("path", "unknown"),
+                    "reason": "sanitization action reported an error; review its audit result",
+                })
+        if verification.incomplete:
+            verification.passed = False
         if verification.scope:
             print(f"  SCOPED to {verification.scope} — PII outside these categories was NOT checked")
         if verification.incomplete:
@@ -406,7 +415,7 @@ def main():
     else:
         print("[6/7] Verification: skipped")
         from .verifier import VerificationResult
-        verification = VerificationResult()
+        verification = VerificationResult(passed=False, performed=False)
     print()
 
     # [7/7] Manifest
@@ -428,7 +437,7 @@ def main():
     print(f"Databases sanitized: {manifest['summary']['databases_sanitized']}")
     print(f"Plists sanitized:    {manifest['summary']['plists_sanitized']}")
     print(f"Space freed:         {manifest['summary']['bytes_removed'] / 1024 / 1024:.0f} MB")
-    verify_summary = "PASSED" if verification.passed else "FAILED"
+    verify_summary = ("PASSED" if verification.passed else "FAILED") if verification.performed else "SKIPPED"
     if verification.incomplete:
         verify_summary += f" ({len(verification.incomplete)} incomplete check(s))"
     if verification.scope:
@@ -445,7 +454,7 @@ def main():
             print(f"  Gaps:    {', '.join(comp_report['gaps'])}")
     print()
 
-    if not verification.passed and not args.dry_run:
+    if not verification.passed and verification.performed and not args.dry_run:
         if verification.incomplete and verification.total_findings == 0:
             print("WARNING: Verification could NOT be completed "
                   f"({len(verification.incomplete)} check(s) did not run). "
@@ -456,7 +465,7 @@ def main():
 
     if args.dry_run:
         print("DRY RUN complete. No files were modified.")
-        action_counts = {}
+        action_counts: dict[str, int] = {}
         for a in all_actions:
             t = a.get("action", "unknown")
             action_counts[t] = action_counts.get(t, 0) + 1

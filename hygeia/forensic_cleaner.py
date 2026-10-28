@@ -154,8 +154,8 @@ def _collect_leveldb_dirs(dump_path):
     Deduplicates so a directory matched by both is only returned once.
     Skips directories that are already inside a previously found store.
     """
-    found = []
-    seen = set()
+    found: list[Path] = []
+    seen: set[Path] = set()
 
     def _add(store_dir):
         key = store_dir.resolve()
@@ -229,7 +229,7 @@ def _is_cache_dir(path, dump_path):
 
 def clean_thumbnail_caches(dump_path, dry_run=False):
     actions = []
-    deleted_dirs = []
+    deleted_dirs: list[Path] = []
 
     all_paths = sorted(_safe_rglob(dump_path), key=lambda x: len(x.parts))
     for dirpath in all_paths:
@@ -380,7 +380,7 @@ def clean_quarantine_xattrs(dump_path, dry_run=False):
     Uses os.listxattr() / os.removexattr() from the stdlib (Python 3.3+,
     available on macOS and Linux).
     """
-    actions = []
+    actions: list[dict] = []
 
     if platform.system() != "Darwin":
         log.debug("clean_quarantine_xattrs: non-Darwin platform, skipping")
@@ -436,7 +436,7 @@ def detect_ntfs_ads(dump_path):
     Returns a list of warning dicts (never deletes — removal requires
     platform-specific APIs and can corrupt files if done carelessly).
     """
-    warnings = []
+    warnings: list[dict] = []
 
     if platform.system() != "Windows":
         log.debug("detect_ntfs_ads: non-Windows platform, skipping")

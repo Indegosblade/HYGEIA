@@ -72,6 +72,9 @@ def generate_manifest(
         },
         "verification": {
             "passed": verification_result.passed,
+            "performed": verification_result.performed,
+            "scope": verification_result.scope,
+            "incomplete": verification_result.incomplete,
             "pii_matches": len(verification_result.pii_matches),
             "sqlite_freelist_findings": len(verification_result.sqlite_freelist_findings),
             "exif_failures": len(verification_result.exif_failures),

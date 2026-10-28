@@ -15,6 +15,7 @@ All embedded values are bogus (documentation names).
 """
 
 import sys
+import pytest
 import zlib
 from pathlib import Path
 from unittest.mock import patch
@@ -185,6 +186,7 @@ class TestCompressedMetadataFailClosed:
 # #9 -- symlink traversal write
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("symlink_capable")
 class TestSymlinkTraversalWrite:
 
     def test_metadata_refuses_symlink(self, tmp_path):

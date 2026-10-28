@@ -2,6 +2,7 @@
 
 import shutil
 import sqlite3
+from contextlib import closing
 import sys
 import tempfile
 from pathlib import Path
@@ -362,9 +363,11 @@ def test_freelist_cleared_by_verification_vacuum():
     conn.commit()
     conn.close()
     before = db_path.stat().st_size
-    free_before = sqlite3.connect(str(db_path)).execute("PRAGMA freelist_count").fetchone()[0]
+    with closing(sqlite3.connect(str(db_path))) as probe:
+        free_before = probe.execute("PRAGMA freelist_count").fetchone()[0]
     findings = scan_sqlite_freelist(db_path)
-    free_after = sqlite3.connect(str(db_path)).execute("PRAGMA freelist_count").fetchone()[0]
+    with closing(sqlite3.connect(str(db_path))) as probe:
+        free_after = probe.execute("PRAGMA freelist_count").fetchone()[0]
     assert len(findings) >= 1, (
         f"Free pages must be reported, not silently cleared, got: {findings}"
     )

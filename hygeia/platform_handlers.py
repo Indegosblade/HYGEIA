@@ -18,6 +18,7 @@ Usage
 
 import logging
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
@@ -91,13 +92,12 @@ def detect_database_type(db_path: Path) -> Optional[str]:
         return None
 
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        )
-        tables = {row[0] for row in cursor.fetchall()}
-        conn.close()
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            tables = {row[0] for row in cursor.fetchall()}
     except sqlite3.Error as e:
         log.debug(f"detect_database_type failed on {db_path}: {e}")
         return None
@@ -148,6 +148,7 @@ def _delete_tables(conn: sqlite3.Connection, tables_to_clear: list[str]) -> tupl
             total += count
         except sqlite3.Error as e:
             log.warning(f"Could not clear table {t!r}: {e}")
+            raise
     conn.commit()
     return cleared, total
 
@@ -187,6 +188,7 @@ def _redact_columns(
             total += max(0, cursor.rowcount)
         except sqlite3.Error as e:
             log.warning(f"Could not redact {table}.{actual}: {e}")
+            raise
     conn.commit()
     return total
 
@@ -194,7 +196,12 @@ def _redact_columns(
 def _open_and_prepare(db_path: Path):
     """Open a connection, checkpoint WAL, enable secure_delete."""
     conn = sqlite3.connect(str(db_path))
-    checkpoint_and_prepare(conn)
+    try:
+        checkpoint_and_prepare(conn)
+    except BaseException:
+        # Ownership transfers to the caller only after preparation succeeds.
+        conn.close()
+        raise
     return conn
 
 
@@ -208,17 +215,27 @@ def _build_result(db_type: str, db_path: Path) -> dict:
     }
 
 
+def _finish_database(conn, db_path, result):
+    if not vacuum_and_cleanup(conn, db_path):
+        result["vacuum_failed"] = True
+        result.setdefault("error", "VACUUM failed; database not certified sanitized")
+
+
 def _table_nuke(db_type: str, tables: list[str], db_path: Path) -> dict:
     result = _build_result(db_type, db_path)
+    conn = None
     try:
         conn = _open_and_prepare(db_path)
         cleared, rows = _delete_tables(conn, tables)
         result["tables_cleared"] = cleared
         result["rows_deleted"] = rows
-        vacuum_and_cleanup(conn, db_path)
+        _finish_database(conn, db_path, result)
     except sqlite3.Error as e:
         result["error"] = str(e)
         log.error(f"{db_type} handler failed on {db_path}: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
     return result
 
 
@@ -300,6 +317,7 @@ def _handle_photos_ios(db_path: Path) -> dict:
     Keep schema and non-geographic metadata so the Photos library remains usable.
     """
     result = _build_result("photos_ios", db_path)
+    conn = None
     try:
         conn = _open_and_prepare(db_path)
         cleared, rows = _delete_tables(conn, [
@@ -317,10 +335,13 @@ def _handle_photos_ios(db_path: Path) -> dict:
             rows_redacted += _redact_columns(conn, asset_table, gps_cols, "[GPS_REMOVED]")
         result["rows_redacted"] = rows_redacted
 
-        vacuum_and_cleanup(conn, db_path)
+        _finish_database(conn, db_path, result)
     except sqlite3.Error as e:
         result["error"] = str(e)
         log.error(f"photos_ios handler failed on {db_path}: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
     return result
 
 
@@ -332,6 +353,7 @@ def _handle_notes_ios(db_path: Path) -> dict:
     Delete rows that carry actual note content (ZICNOTEDATA holds body blobs).
     """
     result = _build_result("notes_ios", db_path)
+    conn = None
     try:
         conn = _open_and_prepare(db_path)
 
@@ -347,16 +369,20 @@ def _handle_notes_ios(db_path: Path) -> dict:
         result["tables_cleared"] = cleared
         result["rows_deleted"] += rows
 
-        vacuum_and_cleanup(conn, db_path)
+        _finish_database(conn, db_path, result)
     except sqlite3.Error as e:
         result["error"] = str(e)
         log.error(f"notes_ios handler failed on {db_path}: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
     return result
 
 
 def _handle_knowledgec(db_path: Path) -> dict:
     """Redact third-party app names, delete Siri/Safari/messaging streams."""
     result = _build_result("knowledgec", db_path)
+    conn = None
     try:
         conn = _open_and_prepare(db_path)
         cursor = conn.cursor()
@@ -375,10 +401,13 @@ def _handle_knowledgec(db_path: Path) -> dict:
 
         conn.commit()
         result["tables_cleared"] = ["ZOBJECT"]
-        vacuum_and_cleanup(conn, db_path)
+        _finish_database(conn, db_path, result)
     except sqlite3.Error as e:
         result["error"] = str(e)
         log.error(f"knowledgec handler failed on {db_path}: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
     return result
 
 
@@ -453,8 +482,8 @@ def run_platform_handler(db_path: Path, db_type: str) -> dict:
 
 def sanitize_with_platform_detection(
     db_path: Path,
-    extra_columns: set = None,
-    extra_tables: set = None,
+    extra_columns: set[str] | None = None,
+    extra_tables: set[str] | None = None,
 ) -> dict:
     """
     Auto-detect platform type and run the appropriate handler.
@@ -485,7 +514,13 @@ def sanitize_with_platform_detection(
         generic_result = sanitize_database_generic(db_path, extra_columns, extra_tables)
         platform_result["residual_rows_redacted"] = generic_result.get("rows_redacted", 0)
         platform_result["residual_pii_types"] = generic_result.get("pii_types_found", [])
+        if generic_result.get("error"):
+            platform_result["residual_error"] = generic_result["error"]
+            platform_result["residual_errors_count"] = generic_result.get("errors_count", 0)
+            platform_result["residual_errors"] = generic_result.get("errors", [])
+            platform_result.setdefault("error", "Residual SQLite sanitization incomplete")
     except Exception as e:
         log.warning(f"Residual generic scan failed on {db_path}: {e}")
+        platform_result.setdefault("error", "Residual SQLite sanitization failed")
 
     return platform_result
