@@ -195,8 +195,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Example: hygeia --input ./data --output ./clean"
     )
-    parser.add_argument("--input", "-i", required=True, help="Source data directory")
-    parser.add_argument("--output", "-o", required=True, help="Destination for sanitized copy")
+    parser.add_argument("--input", "-i", help="Source data directory (required for processing)")
+    parser.add_argument("--output", "-o", help="Destination for sanitized copy (required for processing)")
     parser.add_argument("--dry-run", "-n", action="store_true", help="Preview actions without executing")
     parser.add_argument("--compliance", choices=["hipaa", "gdpr", "ccpa", "all"],
                         help="Compliance mode: hipaa, gdpr, ccpa, or all")
@@ -245,6 +245,11 @@ def main():
         print("  hygeia --input ./data --output ./clean --skip-patterns crypto")
         print("  hygeia --input ./data --output ./clean --only exif  # EXIF stripping only")
         sys.exit(0)
+
+    missing = [flag for flag, value in (("--input/-i", args.input),
+                                       ("--output/-o", args.output)) if value is None]
+    if missing:
+        parser.error(f"the following arguments are required: {', '.join(missing)}")
 
     setup_logging(args.verbose)
     start_time = time.time()

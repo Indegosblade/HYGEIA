@@ -42,8 +42,8 @@ guarantee.
 
 ## Known Non-Goals
 
-These are documented limitations, not vulnerabilities — see the Limitations
-section of the [README](README.md) for the full list (encrypted databases,
+These are documented limitations, not vulnerabilities — see the
+[verification guide](docs/VERIFICATION.md) for the full list (encrypted databases,
 non-SQLite formats like ESE, disk-level artifacts, steganography, etc.).
 Reports about behavior already listed there will be closed as expected
 behavior, though clarifying documentation issues are still welcome.
