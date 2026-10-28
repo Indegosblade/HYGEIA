@@ -1,4 +1,4 @@
-﻿"""
+"""
 HYGEIA SQLite Sanitizer -- WAL-aware database sanitization pipeline.
 
 SQLite WAL files contain 50-95% of deleted records with full PII.
@@ -15,6 +15,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from .sqlite_catalog import column_info, fts_module, fts_option, table_inventory
 from .utils import sha256 as _sha256, quote_identifier, is_safe_regular_file
 
 log = logging.getLogger("hygeia.sqlite")
@@ -48,12 +49,20 @@ def _column_rows(conn, table, column, rowid_name, result, exclude_redacted=False
     extra = f" AND {qc} NOT LIKE '%[REDACTED%'" if exclude_redacted else ""
     try:
         # rowid_name is one of SQLite's three built-in aliases, never input SQL.
-        reader.execute(f"SELECT {rowid_name}, {qc} FROM {qt} WHERE {qc} IS NOT NULL{extra}")
+        has_rowid = True
+        try:
+            reader.execute(f"SELECT {rowid_name}, {qc} FROM {qt} WHERE {qc} IS NOT NULL{extra}")
+        except sqlite3.Error:
+            # WITHOUT ROWID carriers still need a complete read. A matched
+            # value is reported unsupported if no writable locator is available.
+            reader.execute(f"SELECT {qc} FROM {qt} WHERE {qc} IS NOT NULL{extra}")
+            has_rowid = False
         while True:
             batch = reader.fetchmany(SCAN_BATCH_SIZE)
             if not batch:
                 break
-            yield from batch
+            for row in batch:
+                yield row if has_rowid else (None, row[0])
     except sqlite3.Error:
         _record_sanitize_error(result, "read_column", table, column)
     finally:
@@ -72,67 +81,22 @@ def _redaction_retained(conn, qtable, qcol, rowid_name, rowid, value):
 # lives in these index blobs; the regex pass cannot reach it (finding #16).
 FTS_SHADOW_SUFFIXES = (
     "_content", "_segments", "_segdir",
-    "_data", "_idx", "_docsize", "_config",
+    "_data", "_idx", "_docsize", "_config", "_stat",
 )
 
 # Overwrite passes for secure_delete of a database file before unlink (#45).
 _SECURE_OVERWRITE_PASSES = 3
 
-_FTS_VIRTUAL_RE = re.compile(
-    r"CREATE\s+VIRTUAL\s+TABLE.+USING\s+fts", re.IGNORECASE | re.DOTALL
-)
 
 # Matches an explicit ``content`` option in a ``CREATE VIRTUAL TABLE ... USING
 # fts3/4/5(...)`` statement: ``content=''`` (contentless) or
 # ``content='other_table'`` (external content). FTS3/4 support the same
 # option. Its *absence* means FTS is managing its own internal content shadow
 # table (``_content``), which a rebuild can always regenerate the index from.
-_FTS_CONTENT_OPTION_RE = re.compile(
-    r"""^content\s*=\s*(?:'((?:[^']|'')*)'|"((?:[^"]|"")*)"|([^\s,)]+))$""",
-    re.IGNORECASE,
-)
-_SQL_TOKEN_RE = re.compile(
-    r"""--[^\n]*|/\*.*?\*/|'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|[A-Za-z_][A-Za-z_0-9]*|\s+|.""",
-    re.DOTALL,
-)
 
 
 def _fts_content_option(sql):
-    """Read a top-level FTS content option, excluding quoted names/comments.
-
-    ``content='records'`` inside a column name or tokenizer string is data,
-    not a module option. SQLite stores the original quoting in sqlite_master.
-    """
-    lexemes = [piece for piece in _SQL_TOKEN_RE.findall(sql)
-               if not piece.isspace() and not piece.startswith(("--", "/*"))]
-    start = next((i + 3 for i in range(len(lexemes) - 2)
-                  if lexemes[i].upper() == "USING"
-                  and lexemes[i + 1].lower() in {"fts3", "fts4", "fts5"}
-                  and lexemes[i + 2] == "("), None)
-    if start is None:
-        return None
-    argument: list[str] = []
-    depth = 1
-    for piece in lexemes[start:]:
-        if piece == "(":
-            depth += 1
-        elif piece == ")":
-            depth -= 1
-        if (piece == "," and depth == 1) or depth == 0:
-            match = _FTS_CONTENT_OPTION_RE.fullmatch("".join(argument))
-            if match:
-                value = next(value for value in match.groups() if value is not None)
-                if match.group(1) is not None:
-                    value = value.replace("''", "'")
-                elif match.group(2) is not None:
-                    value = value.replace('""', '"')
-                return value
-            argument = []
-            if depth == 0:
-                break
-        else:
-            argument.append(piece)
-    return None
+    return fts_option(sql, "content")
 
 
 def _fts_external_sources(master_rows, fts_bases):
@@ -159,7 +123,7 @@ def _fts_base_tables(master_rows) -> set:
     bases = set()
     for row in master_rows:
         name, sql = row[0], row[1]
-        if sql and _FTS_VIRTUAL_RE.search(sql):
+        if sql and fts_module(sql):
             bases.add(name)
     return bases
 
@@ -241,7 +205,8 @@ def _redact_cell(value, pattern, pii_name: str):
 
 
 def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result,
-                              uncleanable_bases=frozenset(), external_bases=frozenset()) -> bool:
+                              uncleanable_bases=frozenset(), external_bases=frozenset(),
+                              shadow_tables=None) -> bool:
     """Rebuild or safely clear FTS3/4/5 shadow index tables. Return True iff all
     FTS indexes were cleaned without corrupting the database.
 
@@ -263,6 +228,8 @@ def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result,
     was actually purged. Those bases go straight to the integrity-gated
     shadow-clear path below, on every SQLite version alike.
     """
+    if shadow_tables is None:
+        shadow_tables = {name for name, table in table_inventory(conn).items() if table.fts_shadow}
     all_clean = True
     for base in sorted(fts_bases):
         if base not in existing_tables:
@@ -293,7 +260,7 @@ def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result,
                 pass
 
         shadows = [f"{base}{suf}" for suf in FTS_SHADOW_SUFFIXES
-                   if f"{base}{suf}" in existing_tables]
+                   if f"{base}{suf}" in shadow_tables]
         if not shadows:
             all_clean = False
             result.setdefault("fts_cleanup_incomplete", []).append(base)
@@ -685,15 +652,14 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
 
         # Get all tables WITH their SQL so we can identify FTS virtual tables
         # and their shadow index tables (never regex-scan an index blob).
-        cursor.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-        master_rows = cursor.fetchall()
+        inventory = table_inventory(conn)
+        master_rows = [(table.name, table.sql) for table in inventory.values()]
         tables = [row[0] for row in master_rows]
         table_set = set(tables)
         fts_bases = _fts_base_tables(master_rows)
         fts_uncleanable = _fts_uncleanable_bases(master_rows, fts_bases)
         fts_sources = _fts_external_sources(master_rows, fts_bases)
-        fts_shadow = {f"{b}{suf}" for b in fts_bases for suf in FTS_SHADOW_SUFFIXES
-                      if f"{b}{suf}" in table_set}
+        fts_shadow = {name for name, table in inventory.items() if table.fts_shadow}
         ordinary_tables = {
             name.lower() for name, sql in master_rows
             if sql and not re.search(r"CREATE\s+VIRTUAL\s+TABLE", sql, re.IGNORECASE)
@@ -714,7 +680,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
         for table in tables:
             # FTS shadow index tables are handled by rebuild/clear below; a
             # direct write here would corrupt the inverted index (findings #16/#18).
-            if table in fts_shadow:
+            if inventory[table].derived:
                 continue
             result["tables_scanned"] += 1
             if table in fts_sources:
@@ -741,8 +707,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
                 continue
 
             try:
-                cursor.execute(f"PRAGMA table_info({qtable})")
-                columns = cursor.fetchall()
+                columns = column_info(conn, table)
             except sqlite3.Error:
                 _record_sanitize_error(result, "read_schema", table)
                 continue
@@ -751,7 +716,8 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
             # TEXT/VARCHAR/CHAR/CLOB ones. PII text routinely lives in BLOB /
             # INTEGER / REAL columns; non-text scalar cells simply never match
             # inside _redact_cell, which also decodes BLOB bytes (finding #14).
-            text_cols = [col[1] for col in columns]
+            text_cols = [col[1] for col in sorted(columns, key=lambda col: col[6] != 0)]
+            readonly_columns = {col[1] for col in columns if col[6] != 0}
             declared = {col[1].lower() for col in columns}
             rowid_name = next((name for name in ("_rowid_", "rowid", "oid")
                                if name not in declared), None)
@@ -763,6 +729,19 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
                 result["columns_scanned"] += 1
                 col_lower = col_name.lower()
                 qcol = quote_identifier(col_name)
+
+                if col_name in readonly_columns:
+                    rows = _column_rows(conn, table, col_name, rowid_name, result)
+                    try:
+                        for _, value in rows:
+                            sensitive = col_lower in SENSITIVE_COLUMNS and value not in (None, "")
+                            if sensitive or any(_redact_cell(value, pattern, name)[1]
+                                                for name, pattern in PII_PATTERNS.items()):
+                                _record_sanitize_error(result, "read_only_column", table, col_name)
+                                break
+                    finally:
+                        rows.close()
+                    continue
 
                 # Direct redact columns with sensitive names
                 if col_lower in SENSITIVE_COLUMNS:
@@ -838,12 +817,11 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
         for pass_num in range(2, 6):
             pass_redacted = 0
             for table in tables:
-                if table in fts_shadow or table in fts_sources or table.lower() in PII_TABLES:
+                if inventory[table].derived or table in fts_sources or table.lower() in PII_TABLES:
                     continue
                 qtable = quote_identifier(table)
                 try:
-                    cursor.execute(f"PRAGMA table_info({qtable})")
-                    columns = cursor.fetchall()
+                    columns = column_info(conn, table)
                 except sqlite3.Error:
                     _record_sanitize_error(result, "read_schema", table)
                     continue
@@ -852,7 +830,8 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
                                    if name not in declared), None)
                 if rowid_name is None:
                     continue  # recorded in the first pass
-                text_cols = [c[1] for c in columns if c[1].lower() not in SAFE_COLUMNS]
+                text_cols = [c[1] for c in columns
+                             if c[1].lower() not in SAFE_COLUMNS and c[6] == 0]
                 for col_name in text_cols:
                     if col_name.lower() in SENSITIVE_COLUMNS:
                         continue
@@ -892,7 +871,7 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
         # shortcut entirely — that decision is structural (from the DDL), not
         # dependent on whether rebuild happens to raise on this SQLite version.
         fts_ok = _clean_fts_shadow_tables(conn, cursor, fts_bases, table_set, result,
-                                           fts_uncleanable, external_fts5)
+                                           fts_uncleanable, external_fts5, fts_shadow)
         if not fts_ok:
             result["error"] = (
                 "FTS index cleanup incomplete — tokenized PII may remain in the "

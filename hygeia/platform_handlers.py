@@ -19,6 +19,7 @@ Usage
 import logging
 import sqlite3
 from contextlib import closing
+from .sqlite_catalog import column_info, user_table_rows
 from pathlib import Path
 from typing import Optional
 
@@ -93,11 +94,7 @@ def detect_database_type(db_path: Path) -> Optional[str]:
 
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-            )
-            tables = {row[0] for row in cursor.fetchall()}
+            tables = {name for name, _ in user_table_rows(conn)}
     except sqlite3.Error as e:
         log.debug(f"detect_database_type failed on {db_path}: {e}")
         return None
@@ -121,9 +118,7 @@ def detect_database_type(db_path: Path) -> Optional[str]:
 
 def _get_existing_tables(conn: sqlite3.Connection) -> set[str]:
     """Return set of lowercase table names in the database."""
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-    return {row[0].lower() for row in cursor.fetchall()}
+    return {name.lower() for name, _ in user_table_rows(conn)}
 
 
 def _delete_tables(conn: sqlite3.Connection, tables_to_clear: list[str]) -> tuple[list[str], int]:
@@ -170,8 +165,7 @@ def _redact_columns(
 
     qtable = quote_identifier(table)
     # Get actual column names (preserve case)
-    cursor.execute(f'PRAGMA table_info({qtable})')
-    actual_cols = {row[1].lower(): row[1] for row in cursor.fetchall()}
+    actual_cols = {row[1].lower(): row[1] for row in column_info(conn, table)}
 
     total = 0
     for col in columns:

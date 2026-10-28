@@ -10,6 +10,10 @@ Forensic-grade PII sanitization that actually understands what it's looking at.
 
 21 schema-aware handlers detect and surgically clean Chrome profiles, Firefox databases, iOS filesystem dumps, Android extractions, and Windows forensic artifacts — by table signature, not filename guessing. Everything else gets full regex + column-name scanning as a safety net. Zero external pip dependencies.
 
+The current development package is **3.15.1**. Its SQLite carrier catalog is
+shared by sanitizers and verifiers: SQLite's reserved prefix is literal, and
+legal application tables remain visible regardless of SQLite-like or FTS-like names.
+
 **Platforms tested in-house:** Chrome/Chromium (4 handlers) · Firefox (3) · iOS (10) · Android (3) · Windows (1 + filesystem rules) · macOS · Linux
 
 **Compliance:** HIPAA Safe Harbor · GDPR Article 4/9 · CCPA — with per-run coverage reporting.
@@ -215,7 +219,11 @@ Shell history files (.bash_history, .zsh_history, .python_history, etc.), GNOME 
 
 ### Generic (fallback for any unrecognized database)
 
-Any directory containing SQLite databases: HYGEIA scans every column in every table — regardless of declared type, including BLOB/INTEGER/REAL columns holding text-as-bytes — for PII patterns, with no platform-specific knowledge required. This is the safety net — if your database isn't one of the 20 recognized types, it still gets sanitized.
+Any directory containing SQLite databases: HYGEIA scans readable row values
+regardless of declared type, including BLOB/INTEGER/REAL columns holding text.
+Generated and hidden columns are included through SQLite's complete column
+metadata. A matching value that cannot be rewritten is reported as incomplete
+instead of certified sanitized. This safety net also covers unrecognized schemas.
 
 ---
 
@@ -267,7 +275,14 @@ HYGEIA is designed to produce output that withstands examination by forensic too
 
 Every sanitization run includes automatic verification (disable with `--skip-verify`). Verification is **fail-closed**: a missing required tool, an unreadable database, an incomplete scan, or a sanitization action error blocks a PASSED result. A narrowed pattern selection is reported as a scoped result. A pass means no detections under the configured rules after supported checks completed; it does not prove that every possible form of personal data has been removed.
 
-1. **Content scan**: every surviving text file, and the full content of every SQLite database — all tables, all columns regardless of declared type (TEXT/BLOB/INTEGER/REAL), all rows, no row cap — is regex-scanned for the full set of PII patterns. BLOB/bytes cells are UTF-8 decoded before matching, so PII stored in a column typed as binary is still caught. Databases are opened strictly read-only (`mode=ro`); verification never writes to, VACUUMs, or otherwise mutates the artifact it's checking.
+1. **Content scan**: readable SQLite row values include all declared affinities,
+   generated/hidden columns, and the existing UTF-8/UTF-16 byte-decoding policy,
+   across all rows without a row cap. Derived FTS storage is classified using
+   its actual module, configuration and column shape; ordinary lookalike tables
+   stay in the scan. Source content is read through the FTS/source tables, while
+   unsupported or contentless storage is reported incomplete. SQLite files open
+   strictly read-only (`mode=ro`); verification does not mutate them. These are
+   configured row/text checks, not a claim to decode every opaque binary format.
 2. **Freelist inspection**: every SQLite database is opened read-only and checked for non-zero freelist page counts. Any non-zero freelist is always reported as a finding — verification no longer attempts its own VACUUM and silently drops the finding when that VACUUM is blocked by a lock (which used to happen for e.g. a Chrome WAL lock on "Login Data").
 3. **EXIF check**: images are verified for residual GPS coordinates and device identifier tags — but only when exiftool is installed. Without it, images are neither stripped nor verified, and this is now reported as an **incomplete** check rather than a silent, unearned pass.
 4. **False positive filtering**: URL columns, system framework paths, and already-redacted values are excluded to prevent noise.
