@@ -101,21 +101,21 @@ def _fts_content_option(sql):
     ``content='records'`` inside a column name or tokenizer string is data,
     not a module option. SQLite stores the original quoting in sqlite_master.
     """
-    tokens = [token for token in _SQL_TOKEN_RE.findall(sql)
-              if not token.isspace() and not token.startswith(("--", "/*"))]
-    start = next((i + 3 for i in range(len(tokens) - 2)
-                  if tokens[i].upper() == "USING"
-                  and tokens[i + 1].lower() in {"fts3", "fts4", "fts5"}
-                  and tokens[i + 2] == "("), None)
+    lexemes = [piece for piece in _SQL_TOKEN_RE.findall(sql)
+               if not piece.isspace() and not piece.startswith(("--", "/*"))]
+    start = next((i + 3 for i in range(len(lexemes) - 2)
+                  if lexemes[i].upper() == "USING"
+                  and lexemes[i + 1].lower() in {"fts3", "fts4", "fts5"}
+                  and lexemes[i + 2] == "("), None)
     if start is None:
         return None
     argument, depth = [], 1
-    for token in tokens[start:]:
-        if token == "(":
+    for piece in lexemes[start:]:
+        if piece == "(":
             depth += 1
-        elif token == ")":
+        elif piece == ")":
             depth -= 1
-        if (token == "," and depth == 1) or depth == 0:
+        if (piece == "," and depth == 1) or depth == 0:
             match = _FTS_CONTENT_OPTION_RE.fullmatch("".join(argument))
             if match:
                 value = next(value for value in match.groups() if value is not None)
@@ -128,7 +128,7 @@ def _fts_content_option(sql):
             if depth == 0:
                 break
         else:
-            argument.append(token)
+            argument.append(piece)
     return None
 
 
