@@ -108,9 +108,8 @@ def test_package_version_identity_is_consistent():
     import hygeia
 
     project = (pathlib.Path(__file__).parent.parent / "pyproject.toml").read_text()
-    assert 'version = "3.15.1"' in project
-    assert hygeia.__version__ == "3.15.1"
-    assert importlib.metadata.version("hygeia") == "3.15.1"
+    assert f'version = "{hygeia.__version__}"' in project
+    assert importlib.metadata.version("hygeia") == hygeia.__version__
 
 
 def test_older_sqlite_metadata_fallback_uses_config_and_shapes_not_name_patterns():

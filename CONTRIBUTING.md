@@ -17,7 +17,9 @@ intentionally stdlib-only aside from the optional `exiftool` binary).
 ```bash
 git clone https://github.com/Indegosblade/HYGEIA.git
 cd HYGEIA
-pip install -e ".[dev]"
+python -m venv .venv
+# Activate the environment before installing.
+python -m pip install -e ".[dev]"
 ```
 
 This installs HYGEIA in editable mode plus the dev toolchain: pytest,
@@ -25,6 +27,7 @@ pytest-cov, ruff, mypy, bandit.
 
 ## Running the Checks Locally
 
+Run the pinned checks locally before opening or updating a PR that starts CI.
 These are the same checks CI runs, and all are required to pass before merge:
 
 ```bash
@@ -58,7 +61,7 @@ behavior can differ across platforms (case sensitivity, symlink semantics,
 
 - Follow the existing module layout: one concern per file
   (`sqlite_sanitizer.py`, `text_sanitizer.py`, `platform_handlers.py`, etc.).
-  See the Architecture section of the [README](README.md) for what each
+  See the [architecture guide](docs/ARCHITECTURE.md) for what each
   module owns.
 - Regex-based PII patterns belong in `hygeia/rules/pii_patterns.json`, not
   hardcoded in Python — `hygeia/patterns.py` is the single loader all
@@ -75,8 +78,8 @@ behavior can differ across platforms (case sensitivity, symlink semantics,
 
 ## Fail-Closed Is a Design Requirement, Not a Suggestion
 
-HYGEIA's core guarantee is that it never reports a dump "clean" when it
-can't actually back that up — see the Verification section of the README.
+HYGEIA must not report a configured check as passed when it did not complete —
+see the [verification contract](docs/VERIFICATION.md).
 If you touch `verifier.py`, `sqlite_sanitizer.py`, or the compliance
 reporting in `compliance.py`, make sure any new failure path is surfaced
 (via `incomplete`, a `gap`, a non-zero exit code, or an explicit warning)

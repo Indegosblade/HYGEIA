@@ -195,8 +195,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Example: hygeia --input ./data --output ./clean"
     )
-    parser.add_argument("--input", "-i", required=True, help="Source data directory")
-    parser.add_argument("--output", "-o", required=True, help="Destination for sanitized copy")
+    parser.add_argument("--input", "-i", help="Source data directory (required for processing)")
+    parser.add_argument("--output", "-o", help="Destination for sanitized copy (required for processing)")
     parser.add_argument("--dry-run", "-n", action="store_true", help="Preview actions without executing")
     parser.add_argument("--compliance", choices=["hipaa", "gdpr", "ccpa", "all"],
                         help="Compliance mode: hipaa, gdpr, ccpa, or all")
@@ -206,7 +206,8 @@ def main():
     parser.add_argument("--skip-exif", action="store_true", help="Skip EXIF metadata stripping")
     parser.add_argument("--skip-forensic", action="store_true", help="Skip anti-forensic hardening (LevelDB, caches, swap, timestamps)")
     parser.add_argument("--only", type=str, default=None,
-                        help="Only run specific pattern categories or individual patterns (comma-separated). "
+                        help="Limit text sanitization and verification patterns (comma-separated); "
+                             "database and filesystem stages remain active. "
                              "Categories: identity, location, financial, credentials, crypto, healthcare, vehicle. "
                              "Example: --only exif  or  --only vin,credit_card  or  --only financial,credentials")
     parser.add_argument("--skip-patterns", type=str, default=None,
@@ -243,8 +244,14 @@ def main():
         print("Usage:")
         print("  hygeia --input ./data --output ./clean --only identity,financial")
         print("  hygeia --input ./data --output ./clean --skip-patterns crypto")
-        print("  hygeia --input ./data --output ./clean --only exif  # EXIF stripping only")
+        print("  Pattern filters affect text sanitization and verification; "
+              "database and filesystem stages remain active.")
         sys.exit(0)
+
+    missing = [flag for flag, value in (("--input/-i", args.input),
+                                       ("--output/-o", args.output)) if value is None]
+    if missing:
+        parser.error(f"the following arguments are required: {', '.join(missing)}")
 
     setup_logging(args.verbose)
     start_time = time.time()
