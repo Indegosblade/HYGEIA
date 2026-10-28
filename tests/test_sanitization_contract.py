@@ -176,6 +176,20 @@ def test_external_fts5_source_redaction_error_cannot_be_certified(tmp_path):
     assert result.get("error"), "index/source consistency does not prove source redaction succeeded"
 
 
+def test_content_option_text_in_quoted_fts_column_is_not_external_source(tmp_path):
+    db = tmp_path / "quoted-fts-column.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE records(payload TEXT)")
+        conn.execute("INSERT INTO records VALUES ('preserve unrelated source')")
+        conn.execute('''CREATE VIRTUAL TABLE search USING fts5("content='records'")''')
+        conn.execute("INSERT INTO search VALUES ('alice@example.com')")
+    result = sanitize_database_generic(db, registry=_registry())
+    assert not result.get("error"), result
+    with sqlite3.connect(db) as conn:
+        assert "alice@example.com" not in conn.execute("SELECT * FROM search").fetchone()[0]
+        assert conn.execute("SELECT * FROM records").fetchone()[0] == "preserve unrelated source"
+
+
 def test_manifest_preserves_verification_scope_and_incomplete_checks(tmp_path):
     result = VerificationResult(passed=False, scope="identity", incomplete=[{
         "check": "sqlite_content", "path": "data.db", "reason": "locked",

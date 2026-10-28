@@ -86,9 +86,50 @@ _FTS_VIRTUAL_RE = re.compile(
 # option. Its *absence* means FTS is managing its own internal content shadow
 # table (``_content``), which a rebuild can always regenerate the index from.
 _FTS_CONTENT_OPTION_RE = re.compile(
-    r"""\bcontent\s*=\s*(?:'((?:[^']|'')*)'|"((?:[^"]|"")*)"|([^\s,)]+))""",
+    r"""^content\s*=\s*(?:'((?:[^']|'')*)'|"((?:[^"]|"")*)"|([^\s,)]+))$""",
     re.IGNORECASE,
 )
+_SQL_TOKEN_RE = re.compile(
+    r"""--[^\n]*|/\*.*?\*/|'(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\]|[A-Za-z_][A-Za-z_0-9]*|\s+|.""",
+    re.DOTALL,
+)
+
+
+def _fts_content_option(sql):
+    """Read a top-level FTS content option, excluding quoted names/comments.
+
+    ``content='records'`` inside a column name or tokenizer string is data,
+    not a module option. SQLite stores the original quoting in sqlite_master.
+    """
+    tokens = [token for token in _SQL_TOKEN_RE.findall(sql)
+              if not token.isspace() and not token.startswith(("--", "/*"))]
+    start = next((i + 3 for i in range(len(tokens) - 2)
+                  if tokens[i].upper() == "USING"
+                  and tokens[i + 1].lower() in {"fts3", "fts4", "fts5"}
+                  and tokens[i + 2] == "("), None)
+    if start is None:
+        return None
+    argument, depth = [], 1
+    for token in tokens[start:]:
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        if (token == "," and depth == 1) or depth == 0:
+            match = _FTS_CONTENT_OPTION_RE.fullmatch("".join(argument))
+            if match:
+                value = next(value for value in match.groups() if value is not None)
+                if match.group(1) is not None:
+                    value = value.replace("''", "'")
+                elif match.group(2) is not None:
+                    value = value.replace('""', '"')
+                return value
+            argument = []
+            if depth == 0:
+                break
+        else:
+            argument.append(token)
+    return None
 
 
 def _fts_external_sources(master_rows, fts_bases):
@@ -97,15 +138,9 @@ def _fts_external_sources(master_rows, fts_bases):
     for name, sql in master_rows:
         if name not in fts_bases or not sql:
             continue
-        match = _FTS_CONTENT_OPTION_RE.search(sql)
-        if match:
-            value = next(value for value in match.groups() if value is not None)
-            if match.group(1) is not None:
-                value = value.replace("''", "'")
-            elif match.group(2) is not None:
-                value = value.replace('""', '"')
-            if value:
-                sources[name] = value
+        value = _fts_content_option(sql)
+        if value:
+            sources[name] = value
     return sources
 
 
@@ -160,7 +195,7 @@ def _fts_uncleanable_bases(master_rows, fts_bases) -> set:
     sql_by_name = {row[0]: row[1] for row in master_rows}
     for base in fts_bases:
         sql = sql_by_name.get(base)
-        if sql and _FTS_CONTENT_OPTION_RE.search(sql):
+        if sql and _fts_content_option(sql) is not None:
             uncleanable.add(base)
     return uncleanable
 
