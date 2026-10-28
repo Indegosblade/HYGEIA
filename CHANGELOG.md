@@ -5,11 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
-- Development package version 3.15.2: allow `hygeia --list-patterns` without input
+
+## [3.15.2] - 2026-10-28
+- Allow `hygeia --list-patterns` without input
   and output paths; retain required path checks for processing and dry runs (#47).
 - Replace the long README with focused installation, CLI, API, SQLite, architecture,
   and verification guides. Clarify scoped/skipped results, shared inventory, profile
   limitations, and private manifest handling; retain historical release notes below.
+- Declare the existing PolyForm Noncommercial license using SPDX metadata and
+  include its license file explicitly in distributions; require setuptools 77.0.0
+  or later for this packaging format.
 
 ### Previous development changes
 - Development package version 3.15.1: literal SQLite carrier enumeration, complete
