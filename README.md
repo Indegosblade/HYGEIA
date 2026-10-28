@@ -8,15 +8,16 @@ HYGEIA sanitizes copies of filesystem datasets using schema-aware SQLite handler
 PII patterns, file removal rules, and metadata cleanup. It prepares research
 artifacts for review and sharing, with a record of actions and verification gaps.
 
-**Current package: 3.15.2.** Python 3.10 or later; no runtime Python dependencies.
+**Latest published release: [3.15.3](https://github.com/Indegosblade/HYGEIA/releases/tag/v3.15.3).**
+Python 3.10 or later; no runtime Python dependencies.
 Image metadata processing additionally requires [ExifTool](https://exiftool.org/).
 
 ## Install
 
-Use a virtual environment and Git:
+Use a virtual environment and the published release tag:
 
 ```bash
-git clone https://github.com/Indegosblade/HYGEIA.git
+git clone --branch v3.15.3 --depth 1 https://github.com/Indegosblade/HYGEIA.git
 cd HYGEIA
 python -m venv .venv
 # Activate: source .venv/bin/activate (macOS/Linux)
@@ -25,8 +26,15 @@ python -m pip install .
 hygeia --help
 ```
 
-For reproducible deployments, check out a reviewed commit before installation and
-record that revision alongside the package version.
+The tag selects the published source snapshot. Record its commit alongside the
+package version. The [release page](https://github.com/Indegosblade/HYGEIA/releases/tag/v3.15.3)
+also provides a wheel, source archive, and `SHA256SUMS.txt`. After downloading and
+checking the wheel's hash, install it in an activated virtual environment with
+`python -m pip install ./hygeia-3.15.3-py3-none-any.whl`.
+
+For development on current `main`, use the [contribution setup](CONTRIBUTING.md).
+Guides on `main` describe current source behavior; use the tagged guides for an
+older installed release.
 
 ## Run
 

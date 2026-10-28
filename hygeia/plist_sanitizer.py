@@ -404,29 +404,16 @@ def _detect_plist_fmt(filepath: Path) -> plistlib.PlistFormat:
 
 def sanitize_plist(filepath: Path) -> dict:
     """
-    Sanitize a plist file (binary or XML) in two passes:
+    Sanitize a binary/XML plist in place using key and configured regex rules.
 
-    Pass 1 — key-based:
-      * redact_all_values_files  → zero every string/numeric value
-      * all other plists          → redact values whose keys match SENSITIVE_KEY_PATTERNS
+    Key-based redaction is followed by scanning of strings, location-hinted floats,
+    and phone/location-hinted integers. Embedded XML/binary plists in bytes are
+    parsed recursively; other binary data and dates remain outside this scan.
+    Booleans are preserved. The outer file retains its original plist format.
 
-    Pass 2 — universal PII regex scan:
-      * Walk ALL string values in the entire plist structure
-      * Apply PII_PATTERNS (email, phone, MAC, IMEI, IP, …) to every string
-      * Replaces matches with [REDACTED_<TYPE>]
-      * Also scans float values and phone/location-hint-keyed integer values
-        for numeric PII (e.g. GPS coordinates, #13) — see _regex_scan_plist.
-      * Does NOT touch booleans, bytes, or dates
-
-    The file is written back in its original format (binary → binary, XML → XML).
-
-    If a nested plist embedded as a bytes value contains PII that could not
-    be re-serialised after redaction (#12), the failure is surfaced in
-    result["error"] and as a "nested_plist_reserialize_failed" entry in
-    regex_hits rather than silently counted as a normal, successfully
-    redacted hit — see _try_scan_nested_plist_bytes.
-
-    Returns action result dict with keys_redacted and regex_hits fields.
+    Inspect error and nested_plist_reserialize_failed results: a failed nested
+    rewrite must not be counted as successful redaction. Returns action evidence,
+    including keys_redacted and regex_hits; run verification separately.
     """
     result = {
         "action": "plist_sanitize",

@@ -1,9 +1,10 @@
 """
-HYGEIA SQLite Sanitizer -- WAL-aware database sanitization pipeline.
+WAL-aware SQLite sanitization with explicit incomplete results.
 
-SQLite WAL files contain 50-95% of deleted records with full PII.
-Standard deletion leaves them intact. Every database goes through:
-checkpoint > secure_delete > sanitize > VACUUM > delete WAL.
+Where supported, processing checkpoints WAL, enables secure_delete, applies
+rules, rebuilds supported FTS indexes, and runs VACUUM/companion cleanup.
+Failures must be reviewed; logical cleanup does not prove physical erasure from
+SSDs, backups, snapshots, or unallocated storage.
 """
 
 import os
@@ -129,34 +130,13 @@ def _fts_base_tables(master_rows) -> set:
 
 
 def _fts_uncleanable_bases(master_rows, fts_bases) -> set:
-    """Return the subset of ``fts_bases`` that are structurally contentless or
-    external-content FTS tables — i.e. whose ``CREATE VIRTUAL TABLE`` SQL in
-    ``sqlite_master`` declares an explicit ``content=`` option.
+    """
+    Find FTS bases with an explicit content= option requiring special handling.
 
-    This is a STRUCTURAL check, made directly on the DDL text, so it holds
-    regardless of the SQLite version running underneath. That independence
-    matters: whether ``INSERT INTO base(base) VALUES('rebuild')`` raises for
-    a contentless table is a SQLite-version-dependent implementation detail.
-    Newer SQLite raises; older SQLite (e.g. the version bundled with Python
-    3.10) can silently no-op instead — and a bare "rebuild didn't raise" was
-    previously read as "index is clean", which is a false clean on those
-    older versions (findings #16/#18). Detecting the option from the DDL
-    means the fail-closed decision no longer depends on that behavior at all.
-
-    Both forms are treated identically and conservatively:
-
-    - ``content=''`` (contentless): FTS5 stores no row text anywhere —
-      neither in an internal nor external table — only the tokenized
-      postings survive in the ``_data``/``_idx`` shadow tables. There is
-      literally no content for ``rebuild`` to regenerate the index from, so
-      the pre-redaction tokens can persist no matter what ``rebuild`` does.
-    - ``content='other_table'`` (external content): the row text lives in a
-      separately named table that this function does not itself confirm was
-      redacted before rebuild would run, and FTS5's handling of rebuild
-      against external content is exactly the kind of edge case whose
-      behavior has shifted across SQLite versions. Treating it the same as
-      the contentless case is the conservative, fail-closed choice for a
-      forensic PII sanitizer: don't guess, flag it.
+    This structural classification does not decide final cleanability alone.
+    Supported external-content bases are handled first through external_bases in
+    _clean_fts_shadow_tables; contentless/unsupported layouts remain incomplete.
+    Do not infer success from a version-dependent rebuild no-op.
     """
     uncleanable = set()
     sql_by_name = {row[0]: row[1] for row in master_rows}
@@ -168,16 +148,13 @@ def _fts_uncleanable_bases(master_rows, fts_bases) -> set:
 
 
 def _redact_cell(value, pattern, pii_name: str):
-    """Redact ``pattern`` in a single cell value; return ``(new_value, matched)``.
+    """
+    Redact one regex in a string or a UTF-8/UTF-16 interpretation of bytes.
 
-    SQLite is dynamically typed, so PII text routinely sits in BLOB, INTEGER or
-    REAL columns and in bytes/memoryview cells that the old ``isinstance(value,
-    str)`` guard dropped untouched (finding #14). ``str`` values are scanned
-    directly; ``bytes``/``bytearray``/``memoryview`` values are decoded
-    best-effort (utf-8 then utf-16, ``errors='ignore'``) so embedded text
-    (bplist, protobuf, gzip'd or raw UTF-16 message bodies) is scanned and, on a
-    match, redacted and re-encoded in the same encoding. Non-text scalars
-    (int/float/None) never match and are returned unchanged.
+    Decoding ignores invalid sequences and re-encodes using the matching
+    interpretation; it does not parse compressed/encrypted payloads or guarantee
+    preservation of the original binary format. Non-text scalars remain unchanged.
+    Returns (new_value, matched).
     """
     repl = f"[REDACTED_{pii_name.upper()}]"
     if isinstance(value, str):
@@ -207,26 +184,14 @@ def _redact_cell(value, pattern, pii_name: str):
 def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result,
                               uncleanable_bases=frozenset(), external_bases=frozenset(),
                               shadow_tables=None) -> bool:
-    """Rebuild or safely clear FTS3/4/5 shadow index tables. Return True iff all
-    FTS indexes were cleaned without corrupting the database.
+    """
+    Process supported FTS indexes and return whether all handling completed.
 
-    Preferred path: ask the FTS table to rebuild its inverted index from the
-    already-redacted content (``INSERT INTO base(base) VALUES('rebuild')``),
-    which regenerates every ``_data``/``_idx``/``_docsize``/``_config`` shadow.
-    When rebuild is impossible (contentless FTS5), we fall back to deleting the
-    shadow rows — but only inside a SAVEPOINT gated on a post-delete
-    ``integrity_check``. A raw ``DELETE FROM base_data`` leaves the index
-    "malformed", so on any integrity failure we ROLL BACK the delete (preserving
-    the redactions committed earlier) and flag the DB incomplete instead of
-    shipping a corrupt or silently PII-leaking database (findings #16, #18).
-
-    ``uncleanable_bases`` (from ``_fts_uncleanable_bases``) names bases that are
-    structurally contentless/external-content per their DDL. For those we never
-    attempt — and so never trust — the rebuild shortcut: whether it raises is a
-    SQLite-version-dependent detail (older SQLite can silently no-op instead of
-    raising), and a rebuild that doesn't raise is not proof the tokenized index
-    was actually purged. Those bases go straight to the integrity-gated
-    shadow-clear path below, on every SQLite version alike.
+    Stored-content indexes use rebuild. Supported external-content FTS5 bases rebuild
+    from sanitized ordinary rows and run rank=1 integrity-check against that source.
+    Contentless/unsupported bases may attempt an integrity-gated shadow clear, but
+    remain incomplete even if the resulting index is structurally valid. Failed
+    cleanup rolls back the savepoint and records incomplete handling.
     """
     if shadow_tables is None:
         shadow_tables = {name for name, table in table_inventory(conn).items() if table.fts_shadow}
@@ -315,15 +280,12 @@ def _clean_fts_shadow_tables(conn, cursor, fts_bases, existing_tables, result,
 
 
 def _secure_overwrite(path: Path, root: Path | None = None) -> bool:
-    """Overwrite a file's bytes with random data before it is unlinked.
+    """
+    Overwrite a logical file with random bytes and fsync before unlink.
 
-    Honors ``delete_database``'s "securely delete" contract: a plain
-    ``unlink`` leaves the file's data blocks on disk, forensically carvable
-    (finding #45). We overwrite the existing extent with ``os.urandom`` and
-    ``fsync`` so the on-disk bytes are destroyed before the directory entry is
-    removed. Never follows a symlink: writing through a link would clobber a
-    host file outside the dump, so a symlink (or a path escaping ``root`` when
-    one is supplied) is refused and reported as not-overwritten.
+    Refuses symlinks and paths outside an optional root. This does not establish
+    physical erasure from copy-on-write filesystems, remapped SSD blocks, snapshots,
+    or backups. Inspect the returned success flag.
     """
     if path.is_symlink():
         return False
@@ -467,15 +429,11 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path) -> bool:
 
 def delete_database(db_path: Path, root: Path | None = None) -> dict:
     """
-    Securely delete a SQLite database and all companion files.
-    Checkpoints WAL first to prevent PII leakage in orphaned WAL files.
+    Attempt WAL preparation and deletion of a database and its companions.
 
-    The database and its -wal/-shm/-journal companions are overwritten with
-    random bytes before unlink so the deleted records are not recoverable by
-    carving the free blocks (finding #45). Pass ``root`` (the dump root) to
-    enforce that only real regular files inside the dump are overwritten; a
-    symlink is never followed, so this cannot clobber a host file the dump
-    points at.
+    Requests random-byte overwrite before unlink. This is logical file cleanup,
+    not a guarantee against physical recovery. An optional root bounds overwrite
+    targets; symlinks are not followed. Inspect returned errors/action evidence.
     """
     result: dict[str, Any] = {"action": "delete_database", "path": str(db_path),
               "wal_files_removed": [], "secure_overwrite": []}
@@ -586,12 +544,13 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
                               extra_tables: set[str] | None = None,
                               registry=None) -> dict:
     """
-    Platform-agnostic SQLite sanitizer. Scans every TEXT column in every
-    table for PII patterns (emails, phones, URLs with user data, IPs,
-    credentials) and redacts matches. Then VACUUMs to eliminate free pages.
+    Sanitize readable SQLite row carriers using configured patterns and rules.
 
-    Patterns loaded from rules/pii_patterns.json via the central registry.
-    Pass `registry` to override (for --only/--skip filtering).
+    Scans values regardless of declared affinity, including generated/hidden columns
+    and UTF-8/UTF-16 byte interpretations, then attempts FTS cleanup and VACUUM.
+    Unsupported writes/layouts and read/cleanup failures remain explicit errors.
+    Pass registry= for a validated custom pattern selection. This mutates in place;
+    inspect action errors and run verification before sharing the working copy.
     """
     from .patterns import get_default_registry
 

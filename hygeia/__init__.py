@@ -1,13 +1,10 @@
 """
-HYGEIA — Forensic-Grade PII Sanitization
-Greek goddess of cleanliness, hygiene, and sanitation.
+HYGEIA -- filesystem dataset sanitization and bounded verification.
 
-Cross-platform PII sanitization for filesystem dumps, SQLite databases,
-configs, logs, and images. 21 schema-aware handlers ship tested for
-Chrome, Firefox, iOS, Android, Windows, macOS, and Linux artifacts.
-Any unrecognized SQLite database gets full generic regex + column-name scanning.
-
-HIPAA Safe Harbor, GDPR Article 4/9, CCPA compliance modes.
+Processes supported SQLite, text, plist, and metadata formats using schema rules
+and shared pattern policies. Unknown formats and identifiers can remain.
+HIPAA/GDPR/CCPA options select extra rules and coverage reports, not certification.
+See the versioned verification guide before sharing output.
 """
 
-__version__ = "3.15.2"
+__version__ = "3.15.3"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hygeia"
-version = "3.15.2"
+version = "3.15.3"
 description = "Filesystem dataset sanitization with SQLite handlers, PII patterns, metadata cleanup, and explicit verification gaps"
 readme = "README.md"
 license = "PolyForm-Noncommercial-1.0.0"

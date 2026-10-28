@@ -8,9 +8,10 @@ issue, not just a bug.
 ## Supported Versions
 
 HYGEIA does not yet maintain parallel maintenance branches. Security fixes
-are made against the latest release on `main`. If you depend on a pinned
-commit or older tag, re-test against current `main` before assuming a fix
-applies to your pin.
+are developed on `main` and included in subsequent releases. If you depend on
+a pinned commit or older tag, review the fixing revision and re-test before
+assuming a fix applies to your pin. A newer `main` is not the same snapshot as
+an already published release.
 
 ## Reporting a Vulnerability
 
@@ -38,7 +39,7 @@ When reporting, please include:
 There is no fixed SLA for response, but detection gaps and fail-open defects
 (cases where HYGEIA reports `PASSED` without actually having verified that)
 are treated as the highest priority, since they undermine the tool's core
-guarantee.
+verification contract.
 
 ## Known Non-Goals
 

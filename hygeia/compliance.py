@@ -1,32 +1,11 @@
 """
-HYGEIA Compliance Framework — HIPAA, GDPR, CCPA rule enforcement.
+HYGEIA rule profiles and per-run coverage reporting.
 
-Each compliance mode activates additional PII detection rules and
-stricter sanitization thresholds. Modes stack: --compliance all
-applies the union of all frameworks.
-
-Honesty over assurance (findings #5/#6/#7/#28)
-----------------------------------------------
-The printed framework name is only ever a *label*. What HYGEIA actually
-delivers is reported per-run as ``identifiers_covered`` / ``gaps`` /
-``limitations`` so the claim can never outrun the behavior:
-
-* HIPAA Safe Harbor requires date elements be generalized to the year and ZIP
-  codes truncated to 3 digits (000 for low-population prefixes). Those
-  transforms are implemented here as :func:`generalize_date` /
-  :func:`truncate_zip` and exposed via :meth:`ComplianceProfile.transform_value`
-  (the single wiring point that honors ``date_generalization`` /
-  ``zip_truncation``). Where the running pipeline only redacts date/ZIP *columns*
-  by name — and never touches free-text dates/ZIPs — ``dates`` and
-  ``geographic_subdivisions`` are reported at column level and the residual gap
-  is spelled out in ``limitations``.
-* All 18 Safe Harbor identifiers are evaluated. An identifier is ``covered``
-  only with positive evidence in the run's actions; otherwise it is a ``gap``
-  (fail closed — absence of evidence is never silently treated as removed).
-* GDPR/CCPA now produce identifier-level coverage/gaps too, and the
-  ``delete_all_user_content`` / ``delete_browsing_history`` flags are read (no
-  longer dead). Special-category detection is column-name-based only; that limit
-  is stated explicitly rather than implied away by a bare framework name.
+Profiles add schema rules and report identifiers_covered, gaps, and limitations;
+they do not certify legal compliance. The all profile combines implemented rules.
+Date/ZIP generalization helpers are available to direct callers, but the CLI does
+not generalize arbitrary free-text dates or ZIP codes. Special-category detection
+is column-name-based. Review evidence and limitations rather than the label.
 """
 
 import re
