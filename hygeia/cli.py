@@ -206,7 +206,8 @@ def main():
     parser.add_argument("--skip-exif", action="store_true", help="Skip EXIF metadata stripping")
     parser.add_argument("--skip-forensic", action="store_true", help="Skip anti-forensic hardening (LevelDB, caches, swap, timestamps)")
     parser.add_argument("--only", type=str, default=None,
-                        help="Only run specific pattern categories or individual patterns (comma-separated). "
+                        help="Limit text sanitization and verification patterns (comma-separated); "
+                             "database and filesystem stages remain active. "
                              "Categories: identity, location, financial, credentials, crypto, healthcare, vehicle. "
                              "Example: --only exif  or  --only vin,credit_card  or  --only financial,credentials")
     parser.add_argument("--skip-patterns", type=str, default=None,
@@ -243,7 +244,8 @@ def main():
         print("Usage:")
         print("  hygeia --input ./data --output ./clean --only identity,financial")
         print("  hygeia --input ./data --output ./clean --skip-patterns crypto")
-        print("  hygeia --input ./data --output ./clean --only exif  # EXIF stripping only")
+        print("  Pattern filters affect text sanitization and verification; "
+              "database and filesystem stages remain active.")
         sys.exit(0)
 
     missing = [flag for flag, value in (("--input/-i", args.input),

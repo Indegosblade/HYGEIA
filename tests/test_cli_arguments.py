@@ -20,6 +20,7 @@ def test_list_patterns_without_paths(monkeypatch, capsys):
     assert "Available PII pattern categories:" in output.out
     assert "identity:" in output.out
     assert "credit_card" in output.out
+    assert "database and filesystem stages remain active" in output.out
     assert not output.err
 
 
