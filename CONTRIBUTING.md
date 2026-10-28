@@ -44,8 +44,10 @@ bandit -r hygeia/ -c pyproject.toml
 hygeia --help
 ```
 
-The Linux quality gate runs lint, type checking, and Bandit once before the
-Python 3.10–3.13 test matrix starts on Ubuntu, Windows, and macOS. Development
+The Linux quality phase runs Ruff and mypy under `Type Check (mypy)`, then
+Bandit under `Security Scan (bandit)`, before the Python 3.10–3.13 test matrix
+starts on Ubuntu, Windows, and macOS. Those job names preserve the repository's
+existing required checks; each command runs once. Development
 tools are pinned in `pyproject.toml`; validate dependency updates locally before
 publishing a branch. Superseded runs are canceled, and a failed matrix job
 stops its siblings. If you're changing filesystem or path-handling code, be aware that
@@ -90,12 +92,10 @@ following the same naming convention for a new module.
 
 ## Pull Requests
 
-- Required checks must match the workflow's `Quality (lint, types, security)`
-  and `Test (Python 3.12, ubuntu-latest)` job names, and the branch must be up
-  to date with `main` before merge. When adopting the consolidated quality
-  gate, maintainers must update any older required `Type Check (mypy)` and
-  `Security Scan (bandit)` contexts in repository protection; do not bypass
-  protection to work around obsolete check names.
+- PRs require the existing `Type Check (mypy)`, `Security Scan (bandit)`, and
+  `Test (Python 3.12, ubuntu-latest)` checks. The platform matrix waits for
+  both quality jobs to pass. Keep these required context names stable and
+  keep the branch up to date with `main`; do not bypass repository protection.
 - Keep PRs focused — one logical change per PR is easier to review and
   easier to revert if something's wrong.
 - Update `CHANGELOG.md` under an `[Unreleased]` heading for user-visible

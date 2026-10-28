@@ -15,7 +15,8 @@ concurrency:
 
 jobs:
   quality:
-    name: Quality (lint, types, security)
+    # Keep the existing required context; Ruff runs here once before the matrix.
+    name: Type Check (mypy)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -26,11 +27,23 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check .
       - run: mypy hygeia/
+
+  security:
+    name: Security Scan (bandit)
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
       - run: bandit -r hygeia/ -c pyproject.toml
 
   test:
     name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
-    needs: quality
+    needs: [quality, security]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:

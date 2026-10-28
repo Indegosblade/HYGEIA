@@ -17,7 +17,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Development
 - Pin the validated pytest, coverage plugin, Ruff, mypy, and Bandit versions. Check bodies of untyped functions and remove global mypy error-code suppressions after annotating heterogeneous audit payloads and optional parameters.
-- Run lint/type/security once in a Linux quality gate before starting the platform matrix; cancel superseded branch runs and stop sibling matrix jobs after a failure. Preserve the existing coverage reports/upload.
+- Run lint/type/security once in a Linux quality phase before starting the platform matrix, preserving the existing required mypy and Bandit check names; cancel superseded branch runs and stop sibling matrix jobs after a failure. Preserve the existing coverage reports/upload.
 
 ### Added
 - Public `hygeia.verifier.is_false_positive()` policy helper; the historical private helper remains compatible for existing consumers.
