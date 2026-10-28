@@ -18,6 +18,7 @@ Usage
 
 import logging
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Optional
 
@@ -91,13 +92,12 @@ def detect_database_type(db_path: Path) -> Optional[str]:
         return None
 
     try:
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        )
-        tables = {row[0] for row in cursor.fetchall()}
-        conn.close()
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+            tables = {row[0] for row in cursor.fetchall()}
     except sqlite3.Error as e:
         log.debug(f"detect_database_type failed on {db_path}: {e}")
         return None
@@ -196,7 +196,12 @@ def _redact_columns(
 def _open_and_prepare(db_path: Path):
     """Open a connection, checkpoint WAL, enable secure_delete."""
     conn = sqlite3.connect(str(db_path))
-    checkpoint_and_prepare(conn)
+    try:
+        checkpoint_and_prepare(conn)
+    except BaseException:
+        # Ownership transfers to the caller only after preparation succeeds.
+        conn.close()
+        raise
     return conn
 
 

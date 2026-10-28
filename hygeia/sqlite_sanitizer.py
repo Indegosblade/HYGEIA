@@ -11,6 +11,7 @@ import re
 import sqlite3
 import time
 import logging
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -425,31 +426,24 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path) -> bool:
     so callers MUST treat a False return as "not sanitized" and surface it — a
     silent success here is a false clean (finding #15).
     """
-    conn.commit()
-
-    # Flush WAL into the main database file so VACUUM sees a clean state.
     try:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.OperationalError:
-        pass  # Not in WAL mode — ignore
-
-    # Close the connection (and with it every cursor) before VACUUM.
-    conn.close()
+        conn.commit()
+        # Flush WAL into the main database file so VACUUM sees a clean state.
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.OperationalError:
+            pass  # Not in WAL mode — ignore
+    finally:
+        # This function consumes the connection, including on commit failure.
+        conn.close()
 
     def _do_vacuum(path: Path) -> bool:
-        vconn = None
         try:
-            vconn = sqlite3.connect(str(path))
-            vconn.execute("VACUUM")
-            vconn.close()
+            with closing(sqlite3.connect(str(path))) as vconn:
+                vconn.execute("VACUUM")
             return True
         except sqlite3.OperationalError as e:
             log.warning(f"VACUUM attempt failed on {path}: {e}")
-            if vconn:
-                try:
-                    vconn.close()
-                except Exception:
-                    pass
             return False
 
     def _do_vacuum_journal_delete(path: Path) -> bool:
@@ -459,21 +453,14 @@ def vacuum_and_cleanup(conn: sqlite3.Connection, db_path: Path) -> bool:
         forces a full WAL checkpoint and removes the WAL file, which clears the
         OS-level lock that was blocking VACUUM.
         """
-        vconn = None
         try:
-            vconn = sqlite3.connect(str(path))
-            vconn.execute("PRAGMA journal_mode=DELETE")
-            vconn.commit()
-            vconn.execute("VACUUM")
-            vconn.close()
+            with closing(sqlite3.connect(str(path))) as vconn:
+                vconn.execute("PRAGMA journal_mode=DELETE")
+                vconn.commit()
+                vconn.execute("VACUUM")
             return True
         except sqlite3.OperationalError as e:
             log.warning(f"VACUUM (journal_mode=DELETE) failed on {path}: {e}")
-            if vconn:
-                try:
-                    vconn.close()
-                except Exception:
-                    pass
             return False
 
     strategies = [
@@ -528,9 +515,8 @@ def delete_database(db_path: Path, root: Path | None = None) -> dict:
 
     if is_sqlite_database(db_path):
         try:
-            conn = sqlite3.connect(str(db_path))
-            checkpoint_and_prepare(conn)
-            conn.close()
+            with closing(sqlite3.connect(str(db_path))) as conn:
+                checkpoint_and_prepare(conn)
         except sqlite3.Error as e:
             log.warning(f"Could not checkpoint {db_path} before deletion: {e}")
 
@@ -679,9 +665,8 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
 
     # Pre-sanitization integrity check
     try:
-        pre_conn = sqlite3.connect(str(db_path))
-        integrity = pre_conn.execute("PRAGMA integrity_check").fetchone()
-        pre_conn.close()
+        with closing(sqlite3.connect(str(db_path))) as pre_conn:
+            integrity = pre_conn.execute("PRAGMA integrity_check").fetchone()
         if integrity[0] != "ok":
             result["error"] = f"Database corruption detected pre-sanitization: {integrity[0]}"
             result["integrity_pre"] = False
@@ -927,9 +912,8 @@ def sanitize_database_generic(db_path: Path, extra_columns: set[str] | None = No
 
         # Post-sanitization integrity check
         try:
-            post_conn = sqlite3.connect(str(db_path))
-            integrity = post_conn.execute("PRAGMA integrity_check").fetchone()
-            post_conn.close()
+            with closing(sqlite3.connect(str(db_path))) as post_conn:
+                integrity = post_conn.execute("PRAGMA integrity_check").fetchone()
             result["integrity_post"] = integrity[0] == "ok"
             if not result["integrity_post"]:
                 result.setdefault("error", f"Database corrupt post-sanitization: {integrity[0]}")
